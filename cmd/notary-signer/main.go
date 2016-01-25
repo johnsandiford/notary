@@ -1,68 +1,180 @@
+// +build pkcs11
+
 package main
 
 import (
-	"crypto/rand"
 	"crypto/tls"
-	"database/sql"
 	"errors"
 	_ "expvar"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	_ "github.com/docker/distribution/health"
+	"github.com/docker/distribution/health"
 	"github.com/docker/notary/cryptoservice"
+	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/signer"
 	"github.com/docker/notary/signer/api"
+	"github.com/docker/notary/signer/keydbstore"
+	"github.com/docker/notary/trustmanager"
+	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/utils"
 	"github.com/docker/notary/version"
-	"github.com/endophage/gotuf/data"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/miekg/pkcs11"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/spf13/viper"
 
 	"github.com/Sirupsen/logrus"
 	pb "github.com/docker/notary/proto"
-	"github.com/spf13/viper"
 )
 
 const (
+	jsonLogFormat   = "json"
 	debugAddr       = "localhost:8080"
-	dbType          = "mysql"
 	envPrefix       = "NOTARY_SIGNER"
 	defaultAliasEnv = "DEFAULT_ALIAS"
-	pinCode         = "PIN"
 )
 
-var debug bool
-var configFile string
+var (
+	debug      bool
+	logFormat  string
+	configFile string
+	mainViper  = viper.New()
+)
 
 func init() {
-	// set default log level to Error
-	viper.SetDefault("logging", map[string]interface{}{"level": 2})
-
-	viper.SetEnvPrefix(envPrefix)
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
-
+	utils.SetupViper(mainViper, envPrefix)
 	// Setup flags
 	flag.StringVar(&configFile, "config", "", "Path to configuration file")
 	flag.BoolVar(&debug, "debug", false, "show the version and exit")
+	flag.StringVar(&logFormat, "logf", "json", "Set the format of the logs. Only 'json' and 'logfmt' are supported at the moment.")
+
+	// this needs to be in init so that _ALL_ logs are in the correct format
+	if logFormat == jsonLogFormat {
+		logrus.SetFormatter(new(logrus.JSONFormatter))
+	}
 }
 
 func passphraseRetriever(keyName, alias string, createNew bool, attempts int) (passphrase string, giveup bool, err error) {
-	passphrase = viper.GetString(strings.ToUpper(alias))
+	passphrase = mainViper.GetString(strings.ToUpper(alias))
 
 	if passphrase == "" {
 		return "", false, errors.New("expected env variable to not be empty: " + alias)
 	}
 
 	return passphrase, false, nil
+}
+
+// Reads the configuration file for storage setup, and sets up the cryptoservice
+// mapping
+func setUpCryptoservices(configuration *viper.Viper, allowedBackends []string) (
+	signer.CryptoServiceIndex, error) {
+
+	storeConfig, err := utils.ParseStorage(configuration, allowedBackends)
+	if err != nil {
+		return nil, err
+	}
+
+	var keyStore trustmanager.KeyStore
+	if storeConfig.Backend == utils.MemoryBackend {
+		keyStore = trustmanager.NewKeyMemoryStore(
+			passphrase.ConstantRetriever("memory-db-ignore"))
+	} else {
+		defaultAlias := configuration.GetString("storage.default_alias")
+		if defaultAlias == "" {
+			// backwards compatibility - support this environment variable
+			defaultAlias = configuration.GetString(defaultAliasEnv)
+		}
+
+		if defaultAlias == "" {
+			return nil, fmt.Errorf("must provide a default alias for the key DB")
+		}
+		logrus.Debug("Default Alias: ", defaultAlias)
+
+		dbStore, err := keydbstore.NewKeyDBStore(
+			passphraseRetriever, defaultAlias, storeConfig.Backend, storeConfig.Source)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create a new keydbstore: %v", err)
+		}
+		logrus.Debugf("Using %s DB: %s", storeConfig.Backend, storeConfig.Source)
+
+		health.RegisterPeriodicFunc(
+			"DB operational", dbStore.HealthCheck, time.Second*60)
+		keyStore = dbStore
+	}
+
+	cryptoService := cryptoservice.NewCryptoService("", keyStore)
+	cryptoServices := make(signer.CryptoServiceIndex)
+	cryptoServices[data.ED25519Key] = cryptoService
+	cryptoServices[data.ECDSAKey] = cryptoService
+	return cryptoServices, nil
+}
+
+// set up the GRPC server
+func setupGRPCServer(grpcAddr string, tlsConfig *tls.Config,
+	cryptoServices signer.CryptoServiceIndex) (*grpc.Server, net.Listener, error) {
+
+	//RPC server setup
+	kms := &api.KeyManagementServer{CryptoServices: cryptoServices,
+		HealthChecker: health.CheckStatus}
+	ss := &api.SignerServer{CryptoServices: cryptoServices,
+		HealthChecker: health.CheckStatus}
+
+	lis, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("grpc server failed to listen on %s: %v",
+			grpcAddr, err)
+	}
+
+	creds := credentials.NewTLS(tlsConfig)
+	opts := []grpc.ServerOption{grpc.Creds(creds)}
+	grpcServer := grpc.NewServer(opts...)
+
+	pb.RegisterKeyManagementServer(grpcServer, kms)
+	pb.RegisterSignerServer(grpcServer, ss)
+
+	return grpcServer, lis, nil
+}
+
+func setupHTTPServer(httpAddr string, tlsConfig *tls.Config,
+	cryptoServices signer.CryptoServiceIndex) http.Server {
+
+	return http.Server{
+		Addr:      httpAddr,
+		Handler:   api.Handlers(cryptoServices),
+		TLSConfig: tlsConfig,
+	}
+}
+
+func getAddrAndTLSConfig(configuration *viper.Viper) (string, string, *tls.Config, error) {
+	tlsOpts, err := utils.ParseServerTLS(configuration, true)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("unable to set up TLS: %s", err.Error())
+	}
+	tlsConfig, err := utils.ConfigureServerTLS(tlsOpts)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("unable to set up TLS: %s", err.Error())
+	}
+
+	grpcAddr := configuration.GetString("server.grpc_addr")
+	if grpcAddr == "" {
+		return "", "", nil, fmt.Errorf("grpc listen address required for server")
+	}
+
+	httpAddr := configuration.GetString("server.http_addr")
+	if httpAddr == "" {
+		return "", "", nil, fmt.Errorf("http listen address required for server")
+	}
+
+	return httpAddr, grpcAddr, tlsConfig, nil
 }
 
 func main() {
@@ -76,120 +188,54 @@ func main() {
 	// when the signer starts print the version for debugging and issue logs later
 	logrus.Infof("Version: %s, Git commit: %s", version.NotaryVersion, version.GitCommit)
 
-	filename := filepath.Base(configFile)
-	ext := filepath.Ext(configFile)
-	configPath := filepath.Dir(configFile)
+	// parse viper config
+	if err := utils.ParseViper(mainViper, configFile); err != nil {
+		logrus.Fatal(err.Error())
+	}
 
-	viper.SetConfigType(strings.TrimPrefix(ext, "."))
-	viper.SetConfigName(strings.TrimSuffix(filename, ext))
-	viper.AddConfigPath(configPath)
-	err := viper.ReadInConfig()
+	// default is error level
+	lvl, err := utils.ParseLogLevel(mainViper, logrus.ErrorLevel)
 	if err != nil {
-		logrus.Error("Viper Error: ", err.Error())
-		logrus.Error("Could not read config at ", configFile)
-		os.Exit(1)
+		logrus.Fatal(err.Error())
 	}
+	logrus.SetLevel(lvl)
 
-	logrus.SetLevel(logrus.Level(viper.GetInt("logging.level")))
-
-	certFile := viper.GetString("server.cert_file")
-	keyFile := viper.GetString("server.key_file")
-	if certFile == "" || keyFile == "" {
-		usage()
-		log.Fatalf("Certificate and key are mandatory")
-	}
-
-	tlsConfig := &tls.Config{
-		MinVersion:               tls.VersionTLS12,
-		PreferServerCipherSuites: true,
-		CipherSuites: []uint16{
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-			tls.TLS_RSA_WITH_AES_256_CBC_SHA},
-	}
-	tlsConfig.Rand = rand.Reader
-
-	cryptoServices := make(signer.CryptoServiceIndex)
-
-	pin := viper.GetString(pinCode)
-	pkcs11Lib := viper.GetString("crypto.pkcs11lib")
-	if pkcs11Lib != "" {
-		if pin == "" {
-			log.Fatalf("Using PIN is mandatory with pkcs11")
-		}
-
-		ctx, session := SetupHSMEnv(pkcs11Lib, pin)
-
-		defer cleanup(ctx, session)
-
-		cryptoServices[data.RSAKey] = api.NewRSAHardwareCryptoService(ctx, session)
-	}
-
-	configDBType := strings.ToLower(viper.GetString("storage.backend"))
-	dbURL := viper.GetString("storage.db_url")
-	if configDBType != dbType || dbURL == "" {
-		usage()
-		log.Fatalf("Currently only a MySQL database backend is supported.")
-	}
-	dbSQL, err := sql.Open(configDBType, dbURL)
+	// parse bugsnag config
+	bugsnagConf, err := utils.ParseBugsnag(mainViper)
 	if err != nil {
-		log.Fatalf("failed to open the database: %s, %v", dbURL, err)
+		logrus.Fatal(err.Error())
 	}
+	utils.SetUpBugsnag(bugsnagConf)
 
-	defaultAlias := viper.GetString(defaultAliasEnv)
-	logrus.Debug("Default Alias: ", defaultAlias)
-	keyStore, err := signer.NewKeyDBStore(passphraseRetriever, defaultAlias, configDBType, dbSQL)
+	// parse server config
+	httpAddr, grpcAddr, tlsConfig, err := getAddrAndTLSConfig(mainViper)
 	if err != nil {
-		log.Fatalf("failed to create a new keydbstore: %v", err)
+		logrus.Fatal(err.Error())
 	}
-	cryptoService := cryptoservice.NewCryptoService("", keyStore)
 
-	cryptoServices[data.ED25519Key] = cryptoService
-	cryptoServices[data.ECDSAKey] = cryptoService
-
-	//RPC server setup
-	kms := &api.KeyManagementServer{CryptoServices: cryptoServices}
-	ss := &api.SignerServer{CryptoServices: cryptoServices}
-
-	grpcServer := grpc.NewServer()
-	pb.RegisterKeyManagementServer(grpcServer, kms)
-	pb.RegisterSignerServer(grpcServer, ss)
-
-	rpcAddr := viper.GetString("server.grpc_addr")
-	lis, err := net.Listen("tcp", rpcAddr)
+	// setup the cryptoservices
+	cryptoServices, err := setUpCryptoservices(mainViper,
+		[]string{utils.MySQLBackend, utils.MemoryBackend})
 	if err != nil {
-		log.Fatalf("failed to listen %v", err)
+		logrus.Fatal(err.Error())
 	}
-	creds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
-	if err != nil {
-		log.Fatalf("failed to generate credentials %v", err)
-	}
-	go grpcServer.Serve(creds.NewListener(lis))
 
-	httpAddr := viper.GetString("server.http_addr")
-	if httpAddr == "" {
-		log.Fatalf("Server address is required")
+	grpcServer, lis, err := setupGRPCServer(grpcAddr, tlsConfig, cryptoServices)
+	if err != nil {
+		logrus.Fatal(err.Error())
 	}
-	//HTTP server setup
-	server := http.Server{
-		Addr:      httpAddr,
-		Handler:   api.Handlers(cryptoServices),
-		TLSConfig: tlsConfig,
-	}
+
+	httpServer := setupHTTPServer(httpAddr, tlsConfig, cryptoServices)
 
 	if debug {
-		log.Println("RPC server listening on", rpcAddr)
+		log.Println("RPC server listening on", grpcAddr)
 		log.Println("HTTP server listening on", httpAddr)
 	}
 
-	err = server.ListenAndServeTLS(certFile, keyFile)
+	go grpcServer.Serve(lis)
+	err = httpServer.ListenAndServeTLS("", "")
 	if err != nil {
-		log.Fatal("HTTP server failed to start:", err)
+		log.Fatal("HTTPS server failed to start:", err)
 	}
 }
 
@@ -202,50 +248,8 @@ func usage() {
 // endpoints. The addr should not be exposed externally. For most of these to
 // work, tls cannot be enabled on the endpoint, so it is generally separate.
 func debugServer(addr string) {
-	log.Println("Debug server listening on", addr)
+	logrus.Infof("Debug server listening on %s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("error listening on debug interface: %v", err)
+		logrus.Fatalf("error listening on debug interface: %v", err)
 	}
-}
-
-// SetupHSMEnv is a method that depends on the existences
-func SetupHSMEnv(libraryPath, pin string) (*pkcs11.Ctx, pkcs11.SessionHandle) {
-	p := pkcs11.New(libraryPath)
-
-	if p == nil {
-		log.Fatalf("Failed to init library")
-	}
-
-	if err := p.Initialize(); err != nil {
-		log.Fatalf("Initialize error %s\n", err.Error())
-	}
-
-	slots, err := p.GetSlotList(true)
-	if err != nil {
-		log.Fatalf("Failed to list HSM slots %s", err)
-	}
-	// Check to see if we got any slots from the HSM.
-	if len(slots) < 1 {
-		log.Fatalln("No HSM Slots found")
-	}
-
-	// CKF_SERIAL_SESSION: TRUE if cryptographic functions are performed in serial with the application; FALSE if the functions may be performed in parallel with the application.
-	// CKF_RW_SESSION: TRUE if the session is read/write; FALSE if the session is read-only
-	session, err := p.OpenSession(slots[0], pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
-	if err != nil {
-		log.Fatalf("Failed to Start Session with HSM %s", err)
-	}
-
-	if err = p.Login(session, pkcs11.CKU_USER, pin); err != nil {
-		log.Fatalf("User PIN %s\n", err.Error())
-	}
-
-	return p, session
-}
-
-func cleanup(ctx *pkcs11.Ctx, session pkcs11.SessionHandle) {
-	ctx.Destroy()
-	ctx.Finalize()
-	ctx.CloseSession(session)
-	ctx.Logout(session)
 }

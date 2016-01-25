@@ -7,26 +7,28 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/endophage/gotuf/data"
-	"github.com/endophage/gotuf/signed"
+	ctxu "github.com/docker/distribution/context"
 	"github.com/gorilla/mux"
 	"golang.org/x/net/context"
 
-	ctxu "github.com/docker/distribution/context"
-	"github.com/docker/notary/errors"
+	"github.com/docker/notary/server/errors"
+	"github.com/docker/notary/server/snapshot"
 	"github.com/docker/notary/server/storage"
 	"github.com/docker/notary/server/timestamp"
+	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/signed"
+	"github.com/docker/notary/tuf/validation"
 )
 
 // MainHandler is the default handler for the server
 func MainHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	if r.Method == "GET" {
-		_, err := w.Write([]byte("{}"))
-		if err != nil {
-			return errors.ErrUnknown.WithDetail(err)
-		}
-	} else {
+	// For now it only supports `GET`
+	if r.Method != "GET" {
 		return errors.ErrGenericNotFound.WithDetail(nil)
+	}
+
+	if _, err := w.Write([]byte("{}")); err != nil {
+		return errors.ErrUnknown.WithDetail(err)
 	}
 	return nil
 }
@@ -35,13 +37,23 @@ func MainHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 // backend is atomically updated with all the new records.
 func AtomicUpdateHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	defer r.Body.Close()
+	vars := mux.Vars(r)
+	return atomicUpdateHandler(ctx, w, r, vars)
+}
+
+func atomicUpdateHandler(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	gun := vars["imageName"]
 	s := ctx.Value("metaStore")
 	store, ok := s.(storage.MetaStore)
 	if !ok {
 		return errors.ErrNoStorage.WithDetail(nil)
 	}
-	vars := mux.Vars(r)
-	gun := vars["imageName"]
+	cryptoServiceVal := ctx.Value("cryptoService")
+	cryptoService, ok := cryptoServiceVal.(signed.CryptoService)
+	if !ok {
+		return errors.ErrNoCryptoService.WithDetail(nil)
+	}
+
 	reader, err := r.MultipartReader()
 	if err != nil {
 		return errors.ErrMalformedUpload.WithDetail(nil)
@@ -73,45 +85,44 @@ func AtomicUpdateHandler(ctx context.Context, w http.ResponseWriter, r *http.Req
 			Data:    inBuf.Bytes(),
 		})
 	}
-	if err = validateUpdate(gun, updates, store); err != nil {
-		return errors.ErrMalformedUpload.WithDetail(err)
+	updates, err = validateUpdate(cryptoService, gun, updates, store)
+	if err != nil {
+		serializable, serializableError := validation.NewSerializableError(err)
+		if serializableError != nil {
+			return errors.ErrInvalidUpdate.WithDetail(nil)
+		}
+		return errors.ErrInvalidUpdate.WithDetail(serializable)
 	}
 	err = store.UpdateMany(gun, updates)
 	if err != nil {
-		return errors.ErrUpdating.WithDetail(err)
+		// If we have an old version error, surface to user with error code
+		if _, ok := err.(storage.ErrOldVersion); ok {
+			return errors.ErrOldVersion.WithDetail(err)
+		}
+		// More generic storage update error, possibly due to attempted rollback
+		return errors.ErrUpdating.WithDetail(nil)
 	}
 	return nil
 }
 
 // GetHandler returns the json for a specified role and GUN.
 func GetHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	defer r.Body.Close()
+	vars := mux.Vars(r)
+	return getHandler(ctx, w, r, vars)
+}
+
+func getHandler(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	gun := vars["imageName"]
+	checksum := vars["checksum"]
+	tufRole := vars["tufRole"]
 	s := ctx.Value("metaStore")
 	store, ok := s.(storage.MetaStore)
 	if !ok {
 		return errors.ErrNoStorage.WithDetail(nil)
 	}
-	vars := mux.Vars(r)
-	gun := vars["imageName"]
-	tufRole := vars["tufRole"]
 
-	logger := ctxu.GetLoggerWithFields(ctx, map[string]interface{}{"gun": gun, "tufRole": tufRole})
-
-	out, err := store.GetCurrent(gun, tufRole)
-	if err != nil {
-		if _, ok := err.(*storage.ErrNotFound); ok {
-			return errors.ErrMetadataNotFound.WithDetail(nil)
-		}
-		logger.Error("500 GET")
-		return errors.ErrUnknown.WithDetail(err)
-	}
-	if out == nil {
-		logger.Error("404 GET")
-		return errors.ErrMetadataNotFound.WithDetail(nil)
-	}
-	w.Write(out)
-	logger.Debug("200 GET")
-
-	return nil
+	return getRole(ctx, w, store, gun, tufRole, checksum)
 }
 
 // DeleteHandler deletes all data for a GUN. A 200 responses indicates success.
@@ -132,80 +143,76 @@ func DeleteHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 	return nil
 }
 
-// GetTimestampHandler returns a timestamp.json given a GUN
-func GetTimestampHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	s := ctx.Value("metaStore")
-	store, ok := s.(storage.MetaStore)
-	if !ok {
-		return errors.ErrNoStorage.WithDetail(nil)
-	}
-	cryptoServiceVal := ctx.Value("cryptoService")
-	cryptoService, ok := cryptoServiceVal.(signed.CryptoService)
-	if !ok {
-		return errors.ErrNoCryptoService.WithDetail(nil)
-	}
-
+// GetKeyHandler returns a public key for the specified role, creating a new key-pair
+// it if it doesn't yet exist
+func GetKeyHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	defer r.Body.Close()
 	vars := mux.Vars(r)
-	gun := vars["imageName"]
-	logger := ctxu.GetLoggerWithField(ctx, gun, "gun")
-
-	out, err := timestamp.GetOrCreateTimestamp(gun, store, cryptoService)
-	if err != nil {
-		switch err.(type) {
-		case *storage.ErrNoKey, *storage.ErrNotFound:
-			logger.Error("404 GET timestamp")
-			return errors.ErrMetadataNotFound.WithDetail(nil)
-		default:
-			logger.Error("500 GET timestamp")
-			return errors.ErrUnknown.WithDetail(err)
-		}
-	}
-
-	logger.Debug("200 GET timestamp")
-	w.Write(out)
-	return nil
+	return getKeyHandler(ctx, w, r, vars)
 }
 
-// GetTimestampKeyHandler returns a timestamp public key, creating a new key-pair
-// it if it doesn't yet exist
-func GetTimestampKeyHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	vars := mux.Vars(r)
-	gun := vars["imageName"]
+func getKeyHandler(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	gun, ok := vars["imageName"]
+	if !ok || gun == "" {
+		return errors.ErrUnknown.WithDetail("no gun")
+	}
+	role, ok := vars["tufRole"]
+	if !ok || role == "" {
+		return errors.ErrUnknown.WithDetail("no role")
+	}
 
 	logger := ctxu.GetLoggerWithField(ctx, gun, "gun")
 
 	s := ctx.Value("metaStore")
 	store, ok := s.(storage.MetaStore)
-	if !ok {
+	if !ok || store == nil {
 		logger.Error("500 GET storage not configured")
 		return errors.ErrNoStorage.WithDetail(nil)
 	}
 	c := ctx.Value("cryptoService")
 	crypto, ok := c.(signed.CryptoService)
-	if !ok {
+	if !ok || crypto == nil {
 		logger.Error("500 GET crypto service not configured")
 		return errors.ErrNoCryptoService.WithDetail(nil)
 	}
 	algo := ctx.Value("keyAlgorithm")
 	keyAlgo, ok := algo.(string)
-	if !ok {
+	if !ok || keyAlgo == "" {
 		logger.Error("500 GET key algorithm not configured")
 		return errors.ErrNoKeyAlgorithm.WithDetail(nil)
 	}
-	keyAlgorithm := data.KeyAlgorithm(keyAlgo)
+	keyAlgorithm := keyAlgo
 
-	key, err := timestamp.GetOrCreateTimestampKey(gun, store, crypto, keyAlgorithm)
+	var (
+		key data.PublicKey
+		err error
+	)
+	switch role {
+	case data.CanonicalTimestampRole:
+		key, err = timestamp.GetOrCreateTimestampKey(gun, store, crypto, keyAlgorithm)
+	case data.CanonicalSnapshotRole:
+		key, err = snapshot.GetOrCreateSnapshotKey(gun, store, crypto, keyAlgorithm)
+	default:
+		logger.Errorf("400 GET %s key: %v", role, err)
+		return errors.ErrInvalidRole.WithDetail(role)
+	}
 	if err != nil {
-		logger.Error("500 GET timestamp key: %v", err)
+		logger.Errorf("500 GET %s key: %v", role, err)
 		return errors.ErrUnknown.WithDetail(err)
 	}
 
 	out, err := json.Marshal(key)
 	if err != nil {
-		logger.Error("500 GET timestamp key")
+		logger.Errorf("500 GET %s key", role)
 		return errors.ErrUnknown.WithDetail(err)
 	}
-	logger.Debug("200 GET timestamp key")
+	logger.Debugf("200 GET %s key", role)
 	w.Write(out)
 	return nil
+}
+
+// NotFoundHandler is used as a generic catch all handler to return the ErrMetadataNotFound
+// 404 response
+func NotFoundHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	return errors.ErrMetadataNotFound.WithDetail(nil)
 }

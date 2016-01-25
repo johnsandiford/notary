@@ -2,8 +2,7 @@ package signer
 
 import (
 	pb "github.com/docker/notary/proto"
-	"github.com/endophage/gotuf/data"
-	"github.com/endophage/gotuf/signed"
+	"github.com/docker/notary/tuf/signed"
 )
 
 // SigningService is the interface to implement a key management and signing service
@@ -16,7 +15,7 @@ type SigningService interface {
 
 // CryptoServiceIndex represents a mapping between a service algorithm string
 // and a CryptoService
-type CryptoServiceIndex map[data.KeyAlgorithm]signed.CryptoService
+type CryptoServiceIndex map[string]signed.CryptoService
 
 // KeyManager is the interface to implement key management (possibly a key database)
 type KeyManager interface {

@@ -7,11 +7,11 @@ import (
 	"testing"
 
 	"github.com/docker/notary/cryptoservice"
-	"github.com/docker/notary/pkg/passphrase"
+	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/signer"
 	"github.com/docker/notary/signer/api"
 	"github.com/docker/notary/trustmanager"
-	"github.com/endophage/gotuf/data"
+	"github.com/docker/notary/tuf/data"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -26,6 +26,10 @@ var (
 	grpcServer *grpc.Server
 	void       *pb.Void
 	pr         passphrase.Retriever
+	health     = map[string]string{
+		"db":    "ok",
+		"other": "not ok",
+	}
 )
 
 func init() {
@@ -34,9 +38,16 @@ func init() {
 	cryptoService := cryptoservice.NewCryptoService("", keyStore)
 	cryptoServices := signer.CryptoServiceIndex{data.ED25519Key: cryptoService, data.RSAKey: cryptoService, data.ECDSAKey: cryptoService}
 	void = &pb.Void{}
+
+	fakeHealth := func() map[string]string {
+		return health
+	}
+
 	//server setup
-	kms := &api.KeyManagementServer{CryptoServices: cryptoServices}
-	ss := &api.SignerServer{CryptoServices: cryptoServices}
+	kms := &api.KeyManagementServer{CryptoServices: cryptoServices,
+		HealthChecker: fakeHealth}
+	ss := &api.SignerServer{CryptoServices: cryptoServices,
+		HealthChecker: fakeHealth}
 	grpcServer = grpc.NewServer()
 	pb.RegisterKeyManagementServer(grpcServer, kms)
 	pb.RegisterSignerServer(grpcServer, ss)
@@ -48,10 +59,11 @@ func init() {
 	go grpcServer.Serve(lis)
 
 	//client setup
-	conn, err := grpc.Dial("127.0.0.1:7899")
+	conn, err := grpc.Dial("127.0.0.1:7899", grpc.WithInsecure())
 	if err != nil {
 		log.Fatalf("fail to dial: %v", err)
 	}
+
 	kmClient = pb.NewKeyManagementClient(conn)
 	sClient = pb.NewSignerClient(conn)
 }
@@ -67,7 +79,7 @@ func TestDeleteKeyHandlerReturnsNotFoundWithNonexistentKey(t *testing.T) {
 }
 
 func TestCreateKeyHandlerCreatesKey(t *testing.T) {
-	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key.String()})
+	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key})
 	assert.NotNil(t, publicKey)
 	assert.NotEmpty(t, publicKey.PublicKey)
 	assert.NotEmpty(t, publicKey.KeyInfo)
@@ -76,14 +88,14 @@ func TestCreateKeyHandlerCreatesKey(t *testing.T) {
 }
 
 func TestDeleteKeyHandlerDeletesCreatedKey(t *testing.T) {
-	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key.String()})
+	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key})
 	ret, err := kmClient.DeleteKey(context.Background(), publicKey.KeyInfo.KeyID)
 	assert.Nil(t, err)
 	assert.Equal(t, ret, void)
 }
 
 func TestKeyInfoReturnsCreatedKeys(t *testing.T) {
-	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key.String()})
+	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key})
 	fmt.Println("Pubkey ID: " + publicKey.GetKeyInfo().KeyID.ID)
 	returnedPublicKey, err := kmClient.GetKeyInfo(context.Background(), publicKey.KeyInfo.KeyID)
 	fmt.Println("returnedPublicKey ID: " + returnedPublicKey.GetKeyInfo().KeyID.ID)
@@ -94,9 +106,9 @@ func TestKeyInfoReturnsCreatedKeys(t *testing.T) {
 }
 
 func TestCreateKeyCreatesNewKeys(t *testing.T) {
-	publicKey1, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key.String()})
+	publicKey1, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key})
 	assert.Nil(t, err)
-	publicKey2, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key.String()})
+	publicKey2, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key})
 	assert.Nil(t, err)
 	assert.NotEqual(t, publicKey1, publicKey2)
 	assert.NotEqual(t, publicKey1.KeyInfo, publicKey2.KeyInfo)
@@ -116,7 +128,7 @@ func TestGetKeyInfoReturnsNotFoundOnNonexistKeys(t *testing.T) {
 func TestCreatedKeysCanBeUsedToSign(t *testing.T) {
 	message := []byte{0, 0, 0, 0}
 
-	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key.String()})
+	publicKey, err := kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: data.ED25519Key})
 	assert.Nil(t, err)
 	assert.NotNil(t, publicKey)
 
@@ -139,4 +151,14 @@ func TestSignReturnsNotFoundOnNonexistKeys(t *testing.T) {
 	assert.NotNil(t, err)
 	assert.Equal(t, grpc.Code(err), codes.NotFound)
 	assert.Nil(t, ret)
+}
+
+func TestHealthChecksForServices(t *testing.T) {
+	sHealthStatus, err := sClient.CheckHealth(context.Background(), void)
+	assert.Nil(t, err)
+	assert.Equal(t, health, sHealthStatus.Status)
+
+	kmHealthStatus, err := kmClient.CheckHealth(context.Background(), void)
+	assert.Nil(t, err)
+	assert.Equal(t, health, kmHealthStatus.Status)
 }

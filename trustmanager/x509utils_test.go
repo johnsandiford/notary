@@ -1,12 +1,16 @@
 package trustmanager
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"io/ioutil"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/docker/notary/tuf/data"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -43,11 +47,13 @@ func TestCertsToKeys(t *testing.T) {
 }
 
 func TestNewCertificate(t *testing.T) {
-	cert, err := NewCertificate("docker.com/alpine")
+	startTime := time.Now()
+	endTime := startTime.AddDate(10, 0, 0)
+	cert, err := NewCertificate("docker.com/alpine", startTime, endTime)
 	assert.NoError(t, err)
 	assert.Equal(t, cert.Subject.CommonName, "docker.com/alpine")
-	assert.True(t, time.Now().Before(cert.NotAfter))
-	assert.True(t, time.Now().AddDate(10, 0, 1).After(cert.NotAfter))
+	assert.Equal(t, cert.NotBefore, startTime)
+	assert.Equal(t, cert.NotAfter, endTime)
 }
 
 func TestKeyOperations(t *testing.T) {
@@ -63,15 +69,15 @@ func TestKeyOperations(t *testing.T) {
 	rsaKey, err := GenerateRSAKey(rand.Reader, 512)
 
 	// Encode our ED private key
-	edPEM, err := KeyToPEM(edKey)
+	edPEM, err := KeyToPEM(edKey, "root")
 	assert.NoError(t, err)
 
 	// Encode our EC private key
-	ecPEM, err := KeyToPEM(ecKey)
+	ecPEM, err := KeyToPEM(ecKey, "root")
 	assert.NoError(t, err)
 
 	// Encode our RSA private key
-	rsaPEM, err := KeyToPEM(rsaKey)
+	rsaPEM, err := KeyToPEM(rsaKey, "root")
 	assert.NoError(t, err)
 
 	// Check to see if ED key it is encoded
@@ -102,15 +108,15 @@ func TestKeyOperations(t *testing.T) {
 	assert.Equal(t, rsaKey.Private(), decodedRSAKey.Private())
 
 	// Encrypt our ED Key
-	encryptedEDKey, err := EncryptPrivateKey(edKey, "ponies")
+	encryptedEDKey, err := EncryptPrivateKey(edKey, "root", "ponies")
 	assert.NoError(t, err)
 
 	// Encrypt our EC Key
-	encryptedECKey, err := EncryptPrivateKey(ecKey, "ponies")
+	encryptedECKey, err := EncryptPrivateKey(ecKey, "root", "ponies")
 	assert.NoError(t, err)
 
 	// Encrypt our RSA Key
-	encryptedRSAKey, err := EncryptPrivateKey(rsaKey, "ponies")
+	encryptedRSAKey, err := EncryptPrivateKey(rsaKey, "root", "ponies")
 	assert.NoError(t, err)
 
 	// Check to see if ED key it is encrypted
@@ -143,4 +149,58 @@ func TestKeyOperations(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, rsaKey.Private(), decryptedRSAKey.Private())
 
+}
+
+// X509PublickeyID returns the public key ID of a RSA X509 key rather than the
+// cert ID
+func TestRSAX509PublickeyID(t *testing.T) {
+	fileBytes, err := ioutil.ReadFile("../fixtures/notary-server.key")
+	assert.NoError(t, err)
+
+	privKey, err := ParsePEMPrivateKey(fileBytes, "")
+	assert.NoError(t, err)
+	expectedTufID := privKey.ID()
+
+	cert, err := LoadCertFromFile("../fixtures/notary-server.crt")
+	assert.NoError(t, err)
+
+	rsaKeyBytes, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	assert.NoError(t, err)
+
+	sameWayTufID := data.NewPublicKey(data.RSAKey, rsaKeyBytes).ID()
+
+	actualTufKey := CertToKey(cert)
+	actualTufID, err := X509PublicKeyID(actualTufKey)
+
+	assert.Equal(t, sameWayTufID, actualTufID)
+	assert.Equal(t, expectedTufID, actualTufID)
+}
+
+// X509PublickeyID returns the public key ID of an ECDSA X509 key rather than
+// the cert ID
+func TestECDSAX509PublickeyID(t *testing.T) {
+	startTime := time.Now()
+	template, err := NewCertificate("something", startTime, startTime.AddDate(10, 0, 0))
+	assert.NoError(t, err)
+	template.SignatureAlgorithm = x509.ECDSAWithSHA256
+	template.PublicKeyAlgorithm = x509.ECDSA
+
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	assert.NoError(t, err)
+
+	tufPrivKey, err := ECDSAToPrivateKey(privKey)
+	assert.NoError(t, err)
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, template, &privKey.PublicKey, privKey)
+	assert.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(derBytes)
+	assert.NoError(t, err)
+
+	tufKey := CertToKey(cert)
+	tufID, err := X509PublicKeyID(tufKey)
+	assert.NoError(t, err)
+
+	assert.Equal(t, tufPrivKey.ID(), tufID)
 }

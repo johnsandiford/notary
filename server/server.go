@@ -1,21 +1,21 @@
 package server
 
 import (
-	"crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/distribution/health"
 	"github.com/docker/distribution/registry/auth"
-	"github.com/endophage/gotuf/data"
-	"github.com/endophage/gotuf/signed"
-	"github.com/gorilla/mux"
-	"golang.org/x/net/context"
-
 	"github.com/docker/notary/server/handlers"
+	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/utils"
+	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/net/context"
 )
 
 func init() {
@@ -26,10 +26,18 @@ func init() {
 	)
 }
 
+func prometheusOpts(operation string) prometheus.SummaryOpts {
+	return prometheus.SummaryOpts{
+		Namespace:   "notary_server",
+		Subsystem:   "http",
+		ConstLabels: prometheus.Labels{"operation": operation},
+	}
+}
+
 // Run sets up and starts a TLS server that can be cancelled using the
 // given configuration. The context it is passed is the context it should
 // use directly for the TLS server, and generate children off for requests
-func Run(ctx context.Context, addr, tlsCertFile, tlsKeyFile string, trust signed.CryptoService, authMethod string, authOpts interface{}) error {
+func Run(ctx context.Context, addr string, tlsConfig *tls.Config, trust signed.CryptoService, authMethod string, authOpts interface{}) error {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
@@ -41,32 +49,9 @@ func Run(ctx context.Context, addr, tlsCertFile, tlsKeyFile string, trust signed
 		return err
 	}
 
-	if tlsCertFile != "" && tlsKeyFile != "" {
-		keypair, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
-		if err != nil {
-			return err
-		}
-		tlsConfig := &tls.Config{
-			MinVersion:               tls.VersionTLS12,
-			PreferServerCipherSuites: true,
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-			},
-			Certificates: []tls.Certificate{keypair},
-			Rand:         rand.Reader,
-		}
-
+	if tlsConfig != nil {
 		logrus.Info("Enabling TLS")
 		lsnr = tls.NewListener(lsnr, tlsConfig)
-	} else if tlsCertFile != "" || tlsKeyFile != "" {
-		return fmt.Errorf("Partial TLS configuration found. Either include both a cert and key file in the configuration, or include neither to disable TLS.")
 	}
 
 	var ac auth.AccessController
@@ -80,19 +65,10 @@ func Run(ctx context.Context, addr, tlsCertFile, tlsKeyFile string, trust signed
 			return err
 		}
 	}
-	hand := utils.RootHandlerFactory(ac, ctx, trust)
 
-	r := mux.NewRouter()
-	r.Methods("GET").Path("/v2/").Handler(hand(handlers.MainHandler))
-	r.Methods("POST").Path("/v2/{imageName:.*}/_trust/tuf/").Handler(hand(handlers.AtomicUpdateHandler, "push", "pull"))
-	r.Methods("GET").Path("/v2/{imageName:.*}/_trust/tuf/{tufRole:(root|targets|snapshot)}.json").Handler(hand(handlers.GetHandler, "pull"))
-	r.Methods("GET").Path("/v2/{imageName:.*}/_trust/tuf/timestamp.json").Handler(hand(handlers.GetTimestampHandler, "pull"))
-	r.Methods("GET").Path("/v2/{imageName:.*}/_trust/tuf/timestamp.key").Handler(hand(handlers.GetTimestampKeyHandler, "push", "pull"))
-	r.Methods("DELETE").Path("/v2/{imageName:.*}/_trust/tuf/").Handler(hand(handlers.DeleteHandler, "push", "pull"))
-	r.Methods("GET", "POST", "PUT", "HEAD", "DELETE").Path("/{other:.*}").Handler(hand(utils.NotFoundHandler))
 	svr := http.Server{
 		Addr:    addr,
-		Handler: r,
+		Handler: RootHandler(ac, ctx, trust),
 	}
 
 	logrus.Info("Starting on ", addr)
@@ -100,4 +76,41 @@ func Run(ctx context.Context, addr, tlsCertFile, tlsKeyFile string, trust signed
 	err = svr.Serve(lsnr)
 
 	return err
+}
+
+// RootHandler returns the handler that routes all the paths from / for the
+// server.
+func RootHandler(ac auth.AccessController, ctx context.Context, trust signed.CryptoService) http.Handler {
+	hand := utils.RootHandlerFactory(ac, ctx, trust)
+
+	r := mux.NewRouter()
+	r.Methods("GET").Path("/v2/").Handler(hand(handlers.MainHandler))
+	r.Methods("POST").Path("/v2/{imageName:.*}/_trust/tuf/").Handler(
+		prometheus.InstrumentHandlerWithOpts(
+			prometheusOpts("UpdateTuf"),
+			hand(handlers.AtomicUpdateHandler, "push", "pull")))
+	r.Methods("GET").Path("/v2/{imageName:.*}/_trust/tuf/{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.json").Handler(
+		prometheus.InstrumentHandlerWithOpts(
+			prometheusOpts("GetRole"),
+			hand(handlers.GetHandler, "pull")))
+	r.Methods("GET").Path("/v2/{imageName:.*}/_trust/tuf/{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.{checksum:[a-fA-F0-9]{64}|[a-fA-F0-9]{96}|[a-fA-F0-9]{128}}.json").Handler(
+		prometheus.InstrumentHandlerWithOpts(
+			prometheusOpts("GetRoleByHash"),
+			hand(handlers.GetHandler, "pull")))
+	r.Methods("GET").Path(
+		"/v2/{imageName:.*}/_trust/tuf/{tufRole:snapshot|timestamp}.key").Handler(
+		prometheus.InstrumentHandlerWithOpts(
+			prometheusOpts("GetKey"),
+			hand(handlers.GetKeyHandler, "push", "pull")))
+	r.Methods("DELETE").Path("/v2/{imageName:.*}/_trust/tuf/").Handler(
+		prometheus.InstrumentHandlerWithOpts(
+			prometheusOpts("DeleteTuf"),
+			hand(handlers.DeleteHandler, "push", "pull")))
+
+	r.Methods("GET").Path("/_notary_server/health").HandlerFunc(health.StatusHandler)
+	r.Methods("GET").Path("/_notary_server/metrics").Handler(prometheus.Handler())
+	r.Methods("GET", "POST", "PUT", "HEAD", "DELETE").Path("/{other:.*}").Handler(
+		hand(handlers.NotFoundHandler))
+
+	return r
 }

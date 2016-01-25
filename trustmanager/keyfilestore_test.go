@@ -3,27 +3,38 @@ package trustmanager
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/docker/notary/pkg/passphrase"
+	"github.com/docker/notary/passphrase"
+	"github.com/docker/notary/tuf/data"
 	"github.com/stretchr/testify/assert"
 )
+
+const cannedPassphrase = "passphrase"
 
 var passphraseRetriever = func(keyID string, alias string, createNew bool, numAttempts int) (string, bool, error) {
 	if numAttempts > 5 {
 		giveup := true
 		return "", giveup, errors.New("passPhraseRetriever failed after too many requests")
 	}
-	return "passphrase", false, nil
+	return cannedPassphrase, false, nil
 }
 
 func TestAddKey(t *testing.T) {
+	testAddKeyWithRole(t, data.CanonicalRootRole, rootKeysSubdir)
+	testAddKeyWithRole(t, data.CanonicalTargetsRole, nonRootKeysSubdir)
+	testAddKeyWithRole(t, data.CanonicalSnapshotRole, nonRootKeysSubdir)
+	testAddKeyWithRole(t, "targets/a/b/c", nonRootKeysSubdir)
+	testAddKeyWithRole(t, "invalidRole", nonRootKeysSubdir)
+}
+
+func testAddKeyWithRole(t *testing.T, role, expectedSubdir string) {
 	testName := "docker.com/notary/root"
 	testExt := "key"
-	testAlias := "root"
 
 	// Temporary directory where test files will be created
 	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
@@ -31,7 +42,7 @@ func TestAddKey(t *testing.T) {
 	defer os.RemoveAll(tempBaseDir)
 
 	// Since we're generating this manually we need to add the extension '.'
-	expectedFilePath := filepath.Join(tempBaseDir, testName+"_"+testAlias+"."+testExt)
+	expectedFilePath := filepath.Join(tempBaseDir, privDir, expectedSubdir, testName+"."+testExt)
 
 	// Create our store
 	store, err := NewKeyFileStore(tempBaseDir, passphraseRetriever)
@@ -41,7 +52,7 @@ func TestAddKey(t *testing.T) {
 	assert.NoError(t, err, "could not generate private key")
 
 	// Call the AddKey function
-	err = store.AddKey(testName, "root", privKey)
+	err = store.AddKey(testName, role, privKey)
 	assert.NoError(t, err, "failed to add key to store")
 
 	// Check to see if file exists
@@ -51,6 +62,109 @@ func TestAddKey(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
+	nonRootRolesToTest := []string{
+		data.CanonicalTargetsRole,
+		data.CanonicalSnapshotRole,
+		"targets/a/b/c",
+		"invalidRole",
+	}
+
+	gun := "docker.io/notary"
+
+	// Root role needs to go in the rootKeySubdir to be read.
+	// All other roles can go in the nonRootKeysSubdir, possibly under a GUN
+	rootKeysSubdirWithGUN := filepath.Clean(filepath.Join(rootKeysSubdir, gun))
+	nonRootKeysSubdirWithGUN := filepath.Clean(filepath.Join(nonRootKeysSubdir, gun))
+
+	testGetKeyWithRole(t, "", data.CanonicalRootRole, rootKeysSubdir, true)
+	testGetKeyWithRole(t, gun, data.CanonicalRootRole, rootKeysSubdirWithGUN, true)
+	for _, role := range nonRootRolesToTest {
+		testGetKeyWithRole(t, "", role, nonRootKeysSubdir, true)
+		testGetKeyWithRole(t, gun, role, nonRootKeysSubdirWithGUN, true)
+	}
+
+	// Root cannot go in the nonRootKeysSubdir, or it won't be able to be read,
+	// and vice versa
+	testGetKeyWithRole(t, "", data.CanonicalRootRole, nonRootKeysSubdir, false)
+	testGetKeyWithRole(t, gun, data.CanonicalRootRole, nonRootKeysSubdirWithGUN, false)
+	for _, role := range nonRootRolesToTest {
+		testGetKeyWithRole(t, "", role, rootKeysSubdir, false)
+		testGetKeyWithRole(t, gun, role, rootKeysSubdirWithGUN, false)
+	}
+}
+
+func testGetKeyWithRole(t *testing.T, gun, role, expectedSubdir string, success bool) {
+	testData := []byte(fmt.Sprintf(`-----BEGIN RSA PRIVATE KEY-----
+role: %s
+
+MIIEogIBAAKCAQEAyUIXjsrWRrvPa4Bzp3VJ6uOUGPay2fUpSV8XzNxZxIG/Opdr
++k3EQi1im6WOqF3Y5AS1UjYRxNuRN+cAZeo3uS1pOTuoSupBXuchVw8s4hZJ5vXn
+TRmGb+xY7tZ1ZVgPfAZDib9sRSUsL/gC+aSyprAjG/YBdbF06qKbfOfsoCEYW1OQ
+82JqHzQH514RFYPTnEGpvfxWaqmFQLmv0uMxV/cAYvqtrGkXuP0+a8PknlD2obw5
+0rHE56Su1c3Q42S7L51K38tpbgWOSRcTfDUWEj5v9wokkNQvyKBwbS996s4EJaZd
+7r6M0h1pHnuRxcSaZLYRwgOe1VNGg2VfWzgd5QIDAQABAoIBAF9LGwpygmj1jm3R
+YXGd+ITugvYbAW5wRb9G9mb6wspnwNsGTYsz/UR0ZudZyaVw4jx8+jnV/i3e5PC6
+QRcAgqf8l4EQ/UuThaZg/AlT1yWp9g4UyxNXja87EpTsGKQGwTYxZRM4/xPyWOzR
+mt8Hm8uPROB9aA2JG9npaoQG8KSUj25G2Qot3ukw/IOtqwN/Sx1EqF0EfCH1K4KU
+a5TrqlYDFmHbqT1zTRec/BTtVXNsg8xmF94U1HpWf3Lpg0BPYT7JiN2DPoLelRDy
+a/A+a3ZMRNISL5wbq/jyALLOOyOkIqa+KEOeW3USuePd6RhDMzMm/0ocp5FCwYfo
+k4DDeaECgYEA0eSMD1dPGo+u8UTD8i7ZsZCS5lmXLNuuAg5f5B/FGghD8ymPROIb
+dnJL5QSbUpmBsYJ+nnO8RiLrICGBe7BehOitCKi/iiZKJO6edrfNKzhf4XlU0HFl
+jAOMa975pHjeCoZ1cXJOEO9oW4SWTCyBDBSqH3/ZMgIOiIEk896lSmkCgYEA9Xf5
+Jqv3HtQVvjugV/axAh9aI8LMjlfFr9SK7iXpY53UdcylOSWKrrDok3UnrSEykjm7
+UL3eCU5jwtkVnEXesNn6DdYo3r43E6iAiph7IBkB5dh0yv3vhIXPgYqyTnpdz4pg
+3yPGBHMPnJUBThg1qM7k6a2BKHWySxEgC1DTMB0CgYAGvdmF0J8Y0k6jLzs/9yNE
+4cjmHzCM3016gW2xDRgumt9b2xTf+Ic7SbaIV5qJj6arxe49NqhwdESrFohrKaIP
+kM2l/o2QaWRuRT/Pvl2Xqsrhmh0QSOQjGCYVfOb10nAHVIRHLY22W4o1jk+piLBo
+a+1+74NRaOGAnu1J6/fRKQKBgAF180+dmlzemjqFlFCxsR/4G8s2r4zxTMXdF+6O
+3zKuj8MbsqgCZy7e8qNeARxwpCJmoYy7dITNqJ5SOGSzrb2Trn9ClP+uVhmR2SH6
+AlGQlIhPn3JNzI0XVsLIloMNC13ezvDE/7qrDJ677EQQtNEKWiZh1/DrsmHr+irX
+EkqpAoGAJWe8PC0XK2RE9VkbSPg9Ehr939mOLWiHGYTVWPttUcum/rTKu73/X/mj
+WxnPWGtzM1pHWypSokW90SP4/xedMxludvBvmz+CTYkNJcBGCrJumy11qJhii9xp
+EMl3eFOJXjIch/wIesRSN+2dGOsl7neercjMh1i9RvpCwHDx/E0=
+-----END RSA PRIVATE KEY-----
+`, role))
+	testName := "keyID"
+	testExt := "key"
+	perms := os.FileMode(0755)
+
+	emptyPassphraseRetriever := func(string, string, bool, int) (string, bool, error) { return "", false, nil }
+
+	// Temporary directory where test files will be created
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	assert.NoError(t, err, "failed to create a temporary directory")
+	defer os.RemoveAll(tempBaseDir)
+
+	// Since we're generating this manually we need to add the extension '.'
+	filePath := filepath.Join(tempBaseDir, privDir, expectedSubdir, testName+"."+testExt)
+	os.MkdirAll(filepath.Dir(filePath), perms)
+	err = ioutil.WriteFile(filePath, testData, perms)
+	assert.NoError(t, err, "failed to write test file")
+
+	// Create our store
+	store, err := NewKeyFileStore(tempBaseDir, emptyPassphraseRetriever)
+	assert.NoError(t, err, "failed to create new key filestore")
+
+	// Call the GetKey function
+	if gun != "" {
+		testName = gun + "/keyID"
+	}
+	privKey, _, err := store.GetKey(testName)
+	if success {
+		assert.NoError(t, err, "failed to get %s key from store (it's in %s)", role, expectedSubdir)
+
+		pemPrivKey, err := KeyToPEM(privKey, role)
+		assert.NoError(t, err, "failed to convert key to PEM")
+		assert.Equal(t, testData, pemPrivKey)
+	} else {
+		assert.Error(t, err, "should not have succeeded getting key from store")
+		assert.Nil(t, privKey)
+	}
+}
+
+// TestGetLegacyKey ensures we can still load keys where the role
+// is stored as part of the filename (i.e. <hexID>_<role>.key
+func TestGetLegacyKey(t *testing.T) {
 	testData := []byte(`-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAyUIXjsrWRrvPa4Bzp3VJ6uOUGPay2fUpSV8XzNxZxIG/Opdr
 +k3EQi1im6WOqF3Y5AS1UjYRxNuRN+cAZeo3uS1pOTuoSupBXuchVw8s4hZJ5vXn
@@ -92,7 +206,7 @@ EMl3eFOJXjIch/wIesRSN+2dGOsl7neercjMh1i9RvpCwHDx/E0=
 	defer os.RemoveAll(tempBaseDir)
 
 	// Since we're generating this manually we need to add the extension '.'
-	filePath := filepath.Join(tempBaseDir, testName+"_"+testAlias+"."+testExt)
+	filePath := filepath.Join(tempBaseDir, privDir, rootKeysSubdir, testName+"_"+testAlias+"."+testExt)
 
 	os.MkdirAll(filepath.Dir(filePath), perms)
 	err = ioutil.WriteFile(filePath, testData, perms)
@@ -103,12 +217,54 @@ EMl3eFOJXjIch/wIesRSN+2dGOsl7neercjMh1i9RvpCwHDx/E0=
 	assert.NoError(t, err, "failed to create new key filestore")
 
 	// Call the GetKey function
-	privKey, _, err := store.GetKey(testName)
+	_, role, err := store.GetKey(testName)
 	assert.NoError(t, err, "failed to get key from store")
+	assert.Equal(t, testAlias, role)
+}
 
-	pemPrivKey, err := KeyToPEM(privKey)
-	assert.NoError(t, err, "failed to convert key to PEM")
-	assert.Equal(t, testData, pemPrivKey)
+func TestListKeys(t *testing.T) {
+	testName := "docker.com/notary/root"
+	perms := os.FileMode(0755)
+
+	// Temporary directory where test files will be created
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	assert.NoError(t, err, "failed to create a temporary directory")
+	defer os.RemoveAll(tempBaseDir)
+
+	// Create our store
+	store, err := NewKeyFileStore(tempBaseDir, passphraseRetriever)
+	assert.NoError(t, err, "failed to create new key filestore")
+
+	privKey, err := GenerateECDSAKey(rand.Reader)
+	assert.NoError(t, err, "could not generate private key")
+
+	roles := append(data.BaseRoles, "targets/a", "invalidRoleName")
+
+	for i, role := range roles {
+		// Call the AddKey function
+		keyName := fmt.Sprintf("%s%d", testName, i)
+		err = store.AddKey(keyName, role, privKey)
+		assert.NoError(t, err, "failed to add key to store")
+
+		// Check to see if the keystore lists this key
+		keyMap := store.ListKeys()
+
+		// Expect to see exactly one key in the map
+		assert.Len(t, keyMap, i+1)
+		// Expect to see privKeyID inside of the map
+		listedRole, ok := keyMap[keyName]
+		assert.True(t, ok)
+		assert.Equal(t, role, listedRole)
+	}
+
+	// Write an invalid filename to the directory
+	filePath := filepath.Join(tempBaseDir, privDir, rootKeysSubdir, "fakekeyname.key")
+	err = ioutil.WriteFile(filePath, []byte("data"), perms)
+	assert.NoError(t, err, "failed to write test file")
+
+	// Check to see if the keystore still lists two keys
+	keyMap := store.ListKeys()
+	assert.Len(t, keyMap, len(roles))
 }
 
 func TestAddGetKeyMemStore(t *testing.T) {
@@ -133,6 +289,7 @@ func TestAddGetKeyMemStore(t *testing.T) {
 	assert.Equal(t, retrievedKey.Public(), privKey.Public())
 	assert.Equal(t, retrievedKey.Private(), privKey.Private())
 }
+
 func TestGetDecryptedWithTamperedCipherText(t *testing.T) {
 	testExt := "key"
 	testAlias := "root"
@@ -155,7 +312,7 @@ func TestGetDecryptedWithTamperedCipherText(t *testing.T) {
 	assert.NoError(t, err, "failed to add key to store")
 
 	// Since we're generating this manually we need to add the extension '.'
-	expectedFilePath := filepath.Join(tempBaseDir, privKey.ID()+"_"+testAlias+"."+testExt)
+	expectedFilePath := filepath.Join(tempBaseDir, privDir, rootKeysSubdir, privKey.ID()+"."+testExt)
 
 	// Get file description, open file
 	fp, err := os.OpenFile(expectedFilePath, os.O_WRONLY, 0600)
@@ -252,9 +409,16 @@ func testGetDecryptedWithInvalidPassphrase(t *testing.T, store KeyStore, newStor
 }
 
 func TestRemoveKey(t *testing.T) {
+	testRemoveKeyWithRole(t, data.CanonicalRootRole, rootKeysSubdir)
+	testRemoveKeyWithRole(t, data.CanonicalTargetsRole, nonRootKeysSubdir)
+	testRemoveKeyWithRole(t, data.CanonicalSnapshotRole, nonRootKeysSubdir)
+	testRemoveKeyWithRole(t, "targets/a/b/c", nonRootKeysSubdir)
+	testRemoveKeyWithRole(t, "invalidRole", nonRootKeysSubdir)
+}
+
+func testRemoveKeyWithRole(t *testing.T, role, expectedSubdir string) {
 	testName := "docker.com/notary/root"
 	testExt := "key"
-	testAlias := "alias"
 
 	// Temporary directory where test files will be created
 	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
@@ -262,7 +426,7 @@ func TestRemoveKey(t *testing.T) {
 	defer os.RemoveAll(tempBaseDir)
 
 	// Since we're generating this manually we need to add the extension '.'
-	expectedFilePath := filepath.Join(tempBaseDir, testName+"_"+testAlias+"."+testExt)
+	expectedFilePath := filepath.Join(tempBaseDir, privDir, expectedSubdir, testName+"."+testExt)
 
 	// Create our store
 	store, err := NewKeyFileStore(tempBaseDir, passphraseRetriever)
@@ -272,7 +436,7 @@ func TestRemoveKey(t *testing.T) {
 	assert.NoError(t, err, "could not generate private key")
 
 	// Call the AddKey function
-	err = store.AddKey(testName, testAlias, privKey)
+	err = store.AddKey(testName, role, privKey)
 	assert.NoError(t, err, "failed to add key to store")
 
 	// Check to see if file exists
@@ -344,4 +508,126 @@ func TestKeysAreCached(t *testing.T) {
 		assert.NoError(t, err, "failed to get key from store")
 	}
 	assert.Equal(t, 2, numTimesCalled, "numTimesCalled should be 2 -- no additional call to passphraseRetriever")
+}
+
+// Exporting a key is successful (it is a valid key)
+func TestKeyFileStoreExportSuccess(t *testing.T) {
+	// Generate a new Private Key
+	privKey, err := GenerateECDSAKey(rand.Reader)
+	assert.NoError(t, err)
+
+	// Temporary directory where test files will be created
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tempBaseDir)
+
+	// Create our FileStore and add the key
+	store, err := NewKeyFileStore(tempBaseDir, passphraseRetriever)
+	assert.NoError(t, err)
+	err = store.AddKey(privKey.ID(), "root", privKey)
+	assert.NoError(t, err)
+
+	assertExportKeySuccess(t, store, privKey)
+}
+
+// Exporting a key that doesn't exist fails (it is a valid key)
+func TestKeyFileStoreExportNonExistantFailure(t *testing.T) {
+	// Temporary directory where test files will be created
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tempBaseDir)
+
+	// Create empty FileStore
+	store, err := NewKeyFileStore(tempBaseDir, passphraseRetriever)
+	assert.NoError(t, err)
+
+	_, err = store.ExportKey("12345")
+	assert.Error(t, err)
+}
+
+// Exporting a key is successful (it is a valid key)
+func TestKeyMemoryStoreExportSuccess(t *testing.T) {
+	// Generate a new Private Key
+	privKey, err := GenerateECDSAKey(rand.Reader)
+	assert.NoError(t, err)
+
+	// Create our MemoryStore and add key to it
+	store := NewKeyMemoryStore(passphraseRetriever)
+	assert.NoError(t, err)
+	err = store.AddKey(privKey.ID(), "root", privKey)
+	assert.NoError(t, err)
+
+	assertExportKeySuccess(t, store, privKey)
+}
+
+// Exporting a key that doesn't exist fails (it is a valid key)
+func TestKeyMemoryStoreExportNonExistantFailure(t *testing.T) {
+	store := NewKeyMemoryStore(passphraseRetriever)
+	_, err := store.ExportKey("12345")
+	assert.Error(t, err)
+}
+
+// Importing a key is successful
+func TestKeyFileStoreImportSuccess(t *testing.T) {
+	// Generate a new Private Key
+	privKey, err := GenerateECDSAKey(rand.Reader)
+	assert.NoError(t, err)
+
+	// Temporary directory where test files will be created
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tempBaseDir)
+
+	// Create our FileStore
+	store, err := NewKeyFileStore(tempBaseDir, passphraseRetriever)
+	assert.NoError(t, err)
+
+	assertImportKeySuccess(t, store, privKey)
+}
+
+// Importing a key is successful
+func TestKeyMemoryStoreImportSuccess(t *testing.T) {
+	// Generate a new Private Key
+	privKey, err := GenerateECDSAKey(rand.Reader)
+	assert.NoError(t, err)
+
+	// Create our MemoryStore
+	store := NewKeyMemoryStore(passphraseRetriever)
+	assert.NoError(t, err)
+
+	assertImportKeySuccess(t, store, privKey)
+}
+
+// Given a keystore and expected key that is in the store, export the key
+// and assert that the exported key is the same and encrypted with the right
+// password.
+func assertExportKeySuccess(
+	t *testing.T, s KeyStore, expectedKey data.PrivateKey) {
+
+	pemBytes, err := s.ExportKey(expectedKey.ID())
+	assert.NoError(t, err)
+
+	reparsedKey, err := ParsePEMPrivateKey(pemBytes, cannedPassphrase)
+	assert.NoError(t, err)
+	assert.Equal(t, expectedKey.Private(), reparsedKey.Private())
+	assert.Equal(t, expectedKey.Public(), reparsedKey.Public())
+}
+
+// Given a keystore and expected key, generate an encrypted PEM of the key
+// and assert that the then imported key is the same and encrypted with the
+// right password.
+func assertImportKeySuccess(
+	t *testing.T, s KeyStore, expectedKey data.PrivateKey) {
+
+	pemBytes, err := EncryptPrivateKey(expectedKey, "root", cannedPassphrase)
+	assert.NoError(t, err)
+
+	err = s.ImportKey(pemBytes, "root")
+	assert.NoError(t, err)
+
+	reimportedKey, reimportedAlias, err := s.GetKey(expectedKey.ID())
+	assert.NoError(t, err)
+	assert.Equal(t, "root", reimportedAlias)
+	assert.Equal(t, expectedKey.Private(), reimportedKey.Private())
+	assert.Equal(t, expectedKey.Public(), reimportedKey.Public())
 }

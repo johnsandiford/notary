@@ -1,15 +1,15 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
-
-	"github.com/endophage/gotuf/data"
 )
 
 type key struct {
-	algorithm data.KeyAlgorithm
+	algorithm string
 	public    []byte
 }
 
@@ -21,16 +21,18 @@ type ver struct {
 // MemStorage is really just designed for dev and testing. It is very
 // inefficient in many scenarios
 type MemStorage struct {
-	lock    sync.Mutex
-	tufMeta map[string][]*ver
-	tsKeys  map[string]*key
+	lock      sync.Mutex
+	tufMeta   map[string][]*ver
+	keys      map[string]map[string]*key
+	checksums map[string]map[string][]byte
 }
 
 // NewMemStorage instantiates a memStorage instance
 func NewMemStorage() *MemStorage {
 	return &MemStorage{
-		tufMeta: make(map[string][]*ver),
-		tsKeys:  make(map[string]*key),
+		tufMeta:   make(map[string][]*ver),
+		keys:      make(map[string]map[string]*key),
+		checksums: make(map[string]map[string][]byte),
 	}
 }
 
@@ -47,6 +49,14 @@ func (st *MemStorage) UpdateCurrent(gun string, update MetaUpdate) error {
 		}
 	}
 	st.tufMeta[id] = append(st.tufMeta[id], &ver{version: update.Version, data: update.Data})
+	checksumBytes := sha256.Sum256(update.Data)
+	checksum := hex.EncodeToString(checksumBytes[:])
+
+	_, ok := st.checksums[gun]
+	if !ok {
+		st.checksums[gun] = make(map[string][]byte)
+	}
+	st.checksums[gun][checksum] = update.Data
 	return nil
 }
 
@@ -58,19 +68,30 @@ func (st *MemStorage) UpdateMany(gun string, updates []MetaUpdate) error {
 	return nil
 }
 
-// GetCurrent returns the metadada for a given role, under a GUN
+// GetCurrent returns the metadata for a given role, under a GUN
 func (st *MemStorage) GetCurrent(gun, role string) (data []byte, err error) {
 	id := entryKey(gun, role)
 	st.lock.Lock()
 	defer st.lock.Unlock()
 	space, ok := st.tufMeta[id]
 	if !ok || len(space) == 0 {
-		return nil, &ErrNotFound{}
+		return nil, ErrNotFound{}
 	}
 	return space[len(space)-1].data, nil
 }
 
-// Delete delets all the metadata for a given GUN
+// GetChecksum returns the metadata for a given role, under a GUN
+func (st *MemStorage) GetChecksum(gun, role, checksum string) (data []byte, err error) {
+	st.lock.Lock()
+	defer st.lock.Unlock()
+	data, ok := st.checksums[gun][checksum]
+	if !ok || len(data) == 0 {
+		return nil, ErrNotFound{}
+	}
+	return data, nil
+}
+
+// Delete deletes all the metadata for a given GUN
 func (st *MemStorage) Delete(gun string) error {
 	st.lock.Lock()
 	defer st.lock.Unlock()
@@ -79,14 +100,19 @@ func (st *MemStorage) Delete(gun string) error {
 			delete(st.tufMeta, k)
 		}
 	}
+	delete(st.checksums, gun)
 	return nil
 }
 
-// GetTimestampKey returns the public key material of the timestamp key of a given gun
-func (st *MemStorage) GetTimestampKey(gun string) (algorithm data.KeyAlgorithm, public []byte, err error) {
+// GetKey returns the public key material of the timestamp key of a given gun
+func (st *MemStorage) GetKey(gun, role string) (algorithm string, public []byte, err error) {
 	// no need for lock. It's ok to return nil if an update
 	// wasn't observed
-	k, ok := st.tsKeys[gun]
+	g, ok := st.keys[gun]
+	if !ok {
+		return "", nil, &ErrNoKey{gun: gun}
+	}
+	k, ok := g[role]
 	if !ok {
 		return "", nil, &ErrNoKey{gun: gun}
 	}
@@ -94,15 +120,23 @@ func (st *MemStorage) GetTimestampKey(gun string) (algorithm data.KeyAlgorithm, 
 	return k.algorithm, k.public, nil
 }
 
-// SetTimestampKey sets a Timestamp key under a gun
-func (st *MemStorage) SetTimestampKey(gun string, algorithm data.KeyAlgorithm, public []byte) error {
+// SetKey sets a key under a gun and role
+func (st *MemStorage) SetKey(gun, role, algorithm string, public []byte) error {
 	k := &key{algorithm: algorithm, public: public}
 	st.lock.Lock()
 	defer st.lock.Unlock()
-	if _, ok := st.tsKeys[gun]; ok {
-		return &ErrTimestampKeyExists{gun: gun}
+
+	// we hold the lock so nothing will be able to race to write a key
+	// between checking and setting
+	_, _, err := st.GetKey(gun, role)
+	if _, ok := err.(*ErrNoKey); !ok {
+		return &ErrKeyExists{gun: gun, role: role}
 	}
-	st.tsKeys[gun] = k
+	_, ok := st.keys[gun]
+	if !ok {
+		st.keys[gun] = make(map[string]*key)
+	}
+	st.keys[gun][role] = k
 	return nil
 }
 

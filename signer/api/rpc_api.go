@@ -1,12 +1,12 @@
 package api
 
 import (
+	"crypto/rand"
 	"fmt"
 
 	ctxu "github.com/docker/distribution/context"
 	"github.com/docker/notary/signer"
 	"github.com/docker/notary/signer/keys"
-	"github.com/endophage/gotuf/data"
 	"golang.org/x/net/context"
 
 	"google.golang.org/grpc"
@@ -18,16 +18,18 @@ import (
 //KeyManagementServer implements the KeyManagementServer grpc interface
 type KeyManagementServer struct {
 	CryptoServices signer.CryptoServiceIndex
+	HealthChecker  func() map[string]string
 }
 
 //SignerServer implements the SignerServer grpc interface
 type SignerServer struct {
 	CryptoServices signer.CryptoServiceIndex
+	HealthChecker  func() map[string]string
 }
 
 //CreateKey returns a PublicKey created using KeyManagementServer's SigningService
 func (s *KeyManagementServer) CreateKey(ctx context.Context, algorithm *pb.Algorithm) (*pb.PublicKey, error) {
-	keyAlgo := data.KeyAlgorithm(algorithm.Algorithm)
+	keyAlgo := algorithm.Algorithm
 
 	service := s.CryptoServices[keyAlgo]
 
@@ -47,7 +49,7 @@ func (s *KeyManagementServer) CreateKey(ctx context.Context, algorithm *pb.Algor
 	return &pb.PublicKey{
 		KeyInfo: &pb.KeyInfo{
 			KeyID:     &pb.KeyID{ID: tufKey.ID()},
-			Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm().String()},
+			Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm()},
 		},
 		PublicKey: tufKey.Public(),
 	}, nil
@@ -100,9 +102,16 @@ func (s *KeyManagementServer) GetKeyInfo(ctx context.Context, keyID *pb.KeyID) (
 	return &pb.PublicKey{
 		KeyInfo: &pb.KeyInfo{
 			KeyID:     &pb.KeyID{ID: tufKey.ID()},
-			Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm().String()},
+			Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm()},
 		},
 		PublicKey: tufKey.Public(),
+	}, nil
+}
+
+//CheckHealth returns the HealthStatus with the service
+func (s *KeyManagementServer) CheckHealth(ctx context.Context, v *pb.Void) (*pb.HealthStatus, error) {
+	return &pb.HealthStatus{
+		Status: s.HealthChecker(),
 	}, nil
 }
 
@@ -117,8 +126,13 @@ func (s *SignerServer) Sign(ctx context.Context, sr *pb.SignatureRequest) (*pb.S
 		return nil, grpc.Errorf(codes.NotFound, "key %s not found", sr.KeyID.ID)
 	}
 
-	signatures, err := service.Sign([]string{sr.KeyID.ID}, sr.Content)
-	if err != nil || len(signatures) != 1 {
+	privKey, _, err := service.GetPrivateKey(tufKey.ID())
+	if err != nil {
+		logger.Errorf("Sign: key %s not found", sr.KeyID.ID)
+		return nil, grpc.Errorf(codes.NotFound, "key %s not found", sr.KeyID.ID)
+	}
+	sig, err := privKey.Sign(rand.Reader, sr.Content, nil)
+	if err != nil {
 		logger.Errorf("Sign: signing failed for KeyID %s on hash %s", sr.KeyID.ID, sr.Content)
 		return nil, grpc.Errorf(codes.Internal, "Signing failed for KeyID %s on hash %s", sr.KeyID.ID, sr.Content)
 	}
@@ -128,11 +142,18 @@ func (s *SignerServer) Sign(ctx context.Context, sr *pb.SignatureRequest) (*pb.S
 	signature := &pb.Signature{
 		KeyInfo: &pb.KeyInfo{
 			KeyID:     &pb.KeyID{ID: tufKey.ID()},
-			Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm().String()},
+			Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm()},
 		},
-		Algorithm: &pb.Algorithm{Algorithm: signatures[0].Method.String()},
-		Content:   signatures[0].Signature,
+		Algorithm: &pb.Algorithm{Algorithm: privKey.SignatureAlgorithm().String()},
+		Content:   sig,
 	}
 
 	return signature, nil
+}
+
+//CheckHealth returns the HealthStatus with the service
+func (s *SignerServer) CheckHealth(ctx context.Context, v *pb.Void) (*pb.HealthStatus, error) {
+	return &pb.HealthStatus{
+		Status: s.HealthChecker(),
+	}, nil
 }

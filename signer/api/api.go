@@ -1,13 +1,14 @@
 package api
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/docker/notary/signer"
 	"github.com/docker/notary/signer/keys"
-	"github.com/endophage/gotuf/data"
-	"github.com/endophage/gotuf/signed"
+	"github.com/docker/notary/tuf/signed"
 	"github.com/gorilla/mux"
 
 	pb "github.com/docker/notary/proto"
@@ -28,20 +29,16 @@ func Handlers(cryptoServices signer.CryptoServiceIndex) *mux.Router {
 // algorithm specified in the HTTP request. If the algorithm isn't specified
 // or isn't supported, an error is returned to the client and this function
 // returns a nil CryptoService
-func getCryptoService(w http.ResponseWriter, algorithm string, cryptoServices signer.CryptoServiceIndex) signed.CryptoService {
+func getCryptoService(algorithm string, cryptoServices signer.CryptoServiceIndex) (signed.CryptoService, error) {
 	if algorithm == "" {
-		http.Error(w, "algorithm not specified", http.StatusBadRequest)
-		return nil
+		return nil, fmt.Errorf("algorithm not specified")
 	}
 
-	service := cryptoServices[data.KeyAlgorithm(algorithm)]
-
-	if service == nil {
-		http.Error(w, "algorithm "+algorithm+" not supported", http.StatusBadRequest)
-		return nil
+	if service, ok := cryptoServices[algorithm]; ok {
+		return service, nil
 	}
 
-	return service
+	return nil, fmt.Errorf("algorithm " + algorithm + " not supported")
 }
 
 // KeyInfo returns a Handler that given a specific Key ID param, returns the public key bits of that key
@@ -67,7 +64,7 @@ func KeyInfo(cryptoServices signer.CryptoServiceIndex) http.Handler {
 		key := &pb.PublicKey{
 			KeyInfo: &pb.KeyInfo{
 				KeyID:     &pb.KeyID{ID: tufKey.ID()},
-				Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm().String()},
+				Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm()},
 			},
 			PublicKey: tufKey.Public(),
 		}
@@ -76,17 +73,18 @@ func KeyInfo(cryptoServices signer.CryptoServiceIndex) http.Handler {
 	})
 }
 
-// CreateKey returns a handler that generates a new
+// CreateKey returns a handler that generates a new key using the provided
+// algorithm. Only the public component of the key is returned.
 func CreateKey(cryptoServices signer.CryptoServiceIndex) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
-		cryptoService := getCryptoService(w, vars["Algorithm"], cryptoServices)
-		if cryptoService == nil {
-			// Error handled inside getCryptoService
+		cryptoService, err := getCryptoService(vars["Algorithm"], cryptoServices)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		tufKey, err := cryptoService.Create("", data.KeyAlgorithm(vars["Algorithm"]))
+		tufKey, err := cryptoService.Create("", vars["Algorithm"])
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(err.Error()))
@@ -95,7 +93,7 @@ func CreateKey(cryptoServices signer.CryptoServiceIndex) http.Handler {
 		key := &pb.PublicKey{
 			KeyInfo: &pb.KeyInfo{
 				KeyID:     &pb.KeyID{ID: tufKey.ID()},
-				Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm().String()},
+				Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm()},
 			},
 			PublicKey: tufKey.Public(),
 		}
@@ -179,8 +177,15 @@ func Sign(cryptoServices signer.CryptoServiceIndex) http.Handler {
 			return
 		}
 
-		signatures, err := cryptoService.Sign([]string{sigRequest.KeyID.ID}, sigRequest.Content)
-		if err != nil || len(signatures) != 1 {
+		privKey, _, err := cryptoService.GetPrivateKey(tufKey.ID())
+		if err != nil {
+			// We got an unexpected error
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+		sig, err := privKey.Sign(rand.Reader, sigRequest.Content, nil)
+		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(err.Error()))
 			return
@@ -188,9 +193,10 @@ func Sign(cryptoServices signer.CryptoServiceIndex) http.Handler {
 		signature := &pb.Signature{
 			KeyInfo: &pb.KeyInfo{
 				KeyID:     &pb.KeyID{ID: tufKey.ID()},
-				Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm().String()},
+				Algorithm: &pb.Algorithm{Algorithm: tufKey.Algorithm()},
 			},
-			Content: signatures[0].Signature,
+			Algorithm: &pb.Algorithm{Algorithm: privKey.SignatureAlgorithm().String()},
+			Content:   sig,
 		}
 
 		json.NewEncoder(w).Encode(signature)

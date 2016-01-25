@@ -3,8 +3,8 @@ package timestamp
 import (
 	"bytes"
 
-	"github.com/endophage/gotuf/data"
-	"github.com/endophage/gotuf/signed"
+	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/signed"
 	"github.com/jfrazelle/go/canonical/json"
 
 	"github.com/Sirupsen/logrus"
@@ -16,25 +16,25 @@ import (
 // found. It attempts to handle the race condition that may occur if 2 servers try to
 // create the key at the same time by simply querying the store a second time if it
 // receives a conflict when writing.
-func GetOrCreateTimestampKey(gun string, store storage.MetaStore, crypto signed.CryptoService, fallBackAlgorithm data.KeyAlgorithm) (data.PublicKey, error) {
-	keyAlgorithm, public, err := store.GetTimestampKey(gun)
+func GetOrCreateTimestampKey(gun string, store storage.MetaStore, crypto signed.CryptoService, createAlgorithm string) (data.PublicKey, error) {
+	keyAlgorithm, public, err := store.GetKey(gun, data.CanonicalTimestampRole)
 	if err == nil {
 		return data.NewPublicKey(keyAlgorithm, public), nil
 	}
 
 	if _, ok := err.(*storage.ErrNoKey); ok {
-		key, err := crypto.Create("timestamp", fallBackAlgorithm)
+		key, err := crypto.Create("timestamp", createAlgorithm)
 		if err != nil {
 			return nil, err
 		}
 		logrus.Debug("Creating new timestamp key for ", gun, ". With algo: ", key.Algorithm())
-		err = store.SetTimestampKey(gun, key.Algorithm(), key.Public())
+		err = store.SetKey(gun, data.CanonicalTimestampRole, key.Algorithm(), key.Public())
 		if err == nil {
 			return key, nil
 		}
 
-		if _, ok := err.(*storage.ErrTimestampKeyExists); ok {
-			keyAlgorithm, public, err = store.GetTimestampKey(gun)
+		if _, ok := err.(*storage.ErrKeyExists); ok {
+			keyAlgorithm, public, err = store.GetKey(gun, data.CanonicalTimestampRole)
 			if err != nil {
 				return nil, err
 			}
@@ -55,7 +55,7 @@ func GetOrCreateTimestamp(gun string, store storage.MetaStore, cryptoService sig
 	}
 	d, err := store.GetCurrent(gun, "timestamp")
 	if err != nil {
-		if _, ok := err.(*storage.ErrNotFound); !ok {
+		if _, ok := err.(storage.ErrNotFound); !ok {
 			logrus.Error("error retrieving timestamp: ", err.Error())
 			return nil, err
 		}
@@ -111,7 +111,7 @@ func snapshotExpired(ts *data.SignedTimestamp, snapshot []byte) bool {
 // version number one higher than prev. The store is used to lookup the current
 // snapshot, this function does not save the newly generated timestamp.
 func CreateTimestamp(gun string, prev *data.SignedTimestamp, snapshot []byte, store storage.MetaStore, cryptoService signed.CryptoService) (*data.Signed, int, error) {
-	algorithm, public, err := store.GetTimestampKey(gun)
+	algorithm, public, err := store.GetKey(gun, data.CanonicalTimestampRole)
 	if err != nil {
 		// owner of gun must have generated a timestamp key otherwise
 		// we won't proceed with generating everything.
