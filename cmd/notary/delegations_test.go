@@ -3,24 +3,25 @@ package main
 import (
 	"crypto/rand"
 	"crypto/x509"
-	"github.com/docker/notary/cryptoservice"
-	"github.com/docker/notary/trustmanager"
-	"github.com/spf13/viper"
-	"github.com/stretchr/testify/assert"
 	"io/ioutil"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/docker/notary/cryptoservice"
+	"github.com/docker/notary/trustmanager"
+	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
 )
 
 var testTrustDir = "trust_dir"
 
 func setup() *delegationCommander {
 	return &delegationCommander{
-		configGetter: func() *viper.Viper {
+		configGetter: func() (*viper.Viper, error) {
 			mainViper := viper.New()
 			mainViper.Set("trust_dir", testTrustDir)
-			return mainViper
+			return mainViper, nil
 		},
 		retriever: nil,
 	}
@@ -68,6 +69,27 @@ func TestAddInvalidDelegationCert(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestAddInvalidShortPubkeyCert(t *testing.T) {
+	// Cleanup after test
+	defer os.RemoveAll(testTrustDir)
+
+	// Setup certificate
+	tempFile, err := ioutil.TempFile("/tmp", "pemfile")
+	assert.NoError(t, err)
+	cert, _, err := generateShortRSAKeyTestCert()
+	_, err = tempFile.Write(trustmanager.CertToPEM(cert))
+	assert.NoError(t, err)
+	tempFile.Close()
+	defer os.Remove(tempFile.Name())
+
+	// Setup commander
+	commander := setup()
+
+	// Should error due to short RSA key
+	err = commander.delegationAdd(commander.GetCommand(), []string{"gun", "targets/delegation", tempFile.Name(), "--paths", "path"})
+	assert.Error(t, err)
+}
+
 func TestRemoveInvalidDelegationName(t *testing.T) {
 	// Cleanup after test
 	defer os.RemoveAll(testTrustDir)
@@ -77,6 +99,18 @@ func TestRemoveInvalidDelegationName(t *testing.T) {
 
 	// Should error due to invalid delegation name (should be prefixed by "targets/")
 	err := commander.delegationRemove(commander.GetCommand(), []string{"gun", "INVALID_NAME", "fake_key_id1", "fake_key_id2"})
+	assert.Error(t, err)
+}
+
+func TestRemoveAllInvalidDelegationName(t *testing.T) {
+	// Cleanup after test
+	defer os.RemoveAll(testTrustDir)
+
+	// Setup commander
+	commander := setup()
+
+	// Should error due to invalid delegation name (should be prefixed by "targets/")
+	err := commander.delegationRemove(commander.GetCommand(), []string{"gun", "INVALID_NAME"})
 	assert.Error(t, err)
 }
 
@@ -131,6 +165,22 @@ func generateExpiredTestCert() (*x509.Certificate, string, error) {
 	// Set to Unix time 0 start time, valid for one more day
 	startTime := time.Unix(0, 0)
 	endTime := startTime.AddDate(0, 0, 1)
+	cert, err := cryptoservice.GenerateCertificate(privKey, "gun", startTime, endTime)
+	if err != nil {
+		return nil, "", err
+	}
+	return cert, keyID, nil
+}
+
+func generateShortRSAKeyTestCert() (*x509.Certificate, string, error) {
+	// 1024 bits is too short
+	privKey, err := trustmanager.GenerateRSAKey(rand.Reader, 1024)
+	if err != nil {
+		return nil, "", err
+	}
+	keyID := privKey.ID()
+	startTime := time.Now()
+	endTime := startTime.AddDate(10, 0, 0)
 	cert, err := cryptoservice.GenerateCertificate(privKey, "gun", startTime, endTime)
 	if err != nil {
 		return nil, "", err

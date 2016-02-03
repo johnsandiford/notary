@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"io/ioutil"
 
-	"github.com/docker/notary"
 	notaryclient "github.com/docker/notary/client"
 	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -32,18 +32,18 @@ var cmdDelegationRemoveTemplate = usageTemplate{
 }
 
 var cmdDelegationAddTemplate = usageTemplate{
-	Use:   "add [ GUN ] [ Role ] <PEM file path 1> ...",
-	Short: "Add a keys to delegation using the provided public key certificate PEMs.",
-	Long:  "Add a keys to delegation using the provided public key certificate PEMs in a specific Global Unique Name.",
+	Use:   "add [ GUN ] [ Role ] <X509 file path 1> ...",
+	Short: "Add a keys to delegation using the provided public key X509 certificates.",
+	Long:  "Add a keys to delegation using the provided public key PEM encoded X509 certificates in a specific Global Unique Name.",
 }
-
-var paths []string
-var removeAll, removeYes bool
 
 type delegationCommander struct {
 	// these need to be set
-	configGetter func() *viper.Viper
+	configGetter func() (*viper.Viper, error)
 	retriever    passphrase.Retriever
+
+	paths                []string
+	removeAll, removeYes bool
 }
 
 func (d *delegationCommander) GetCommand() *cobra.Command {
@@ -51,12 +51,13 @@ func (d *delegationCommander) GetCommand() *cobra.Command {
 	cmd.AddCommand(cmdDelegationListTemplate.ToCommand(d.delegationsList))
 
 	cmdRemDelg := cmdDelegationRemoveTemplate.ToCommand(d.delegationRemove)
-	cmdRemDelg.Flags().StringSliceVar(&paths, "paths", nil, "List of paths to remove")
-	cmdRemDelg.Flags().BoolVarP(&removeYes, "yes", "y", false, "Answer yes to the removal question (no confirmation)")
+	cmdRemDelg.Flags().StringSliceVar(&d.paths, "paths", nil, "List of paths to remove")
+	cmdRemDelg.Flags().BoolVarP(
+		&d.removeYes, "yes", "y", false, "Answer yes to the removal question (no confirmation)")
 	cmd.AddCommand(cmdRemDelg)
 
 	cmdAddDelg := cmdDelegationAddTemplate.ToCommand(d.delegationAdd)
-	cmdAddDelg.Flags().StringSliceVar(&paths, "paths", nil, "List of paths to add")
+	cmdAddDelg.Flags().StringSliceVar(&d.paths, "paths", nil, "List of paths to add")
 	cmd.AddCommand(cmdAddDelg)
 	return cmd
 }
@@ -64,16 +65,26 @@ func (d *delegationCommander) GetCommand() *cobra.Command {
 // delegationsList lists all the delegations for a particular GUN
 func (d *delegationCommander) delegationsList(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
+		cmd.Usage()
 		return fmt.Errorf(
 			"Please provide a Global Unique Name as an argument to list")
 	}
 
-	config := d.configGetter()
+	config, err := d.configGetter()
+	if err != nil {
+		return err
+	}
 
 	gun := args[0]
 
+	rt, err := getTransport(config, gun, true)
+	if err != nil {
+		return err
+	}
+
 	// initialize repo with transport to get latest state of the world before listing delegations
-	nRepo, err := notaryclient.NewNotaryRepository(config.GetString("trust_dir"), gun, getRemoteTrustServer(config), getTransport(config, gun, true), retriever)
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, d.retriever)
 	if err != nil {
 		return err
 	}
@@ -84,7 +95,7 @@ func (d *delegationCommander) delegationsList(cmd *cobra.Command, args []string)
 	}
 
 	cmd.Println("")
-	prettyPrintRoles(delegationRoles, cmd.Out())
+	prettyPrintRoles(delegationRoles, cmd.Out(), "delegations")
 	cmd.Println("")
 	return nil
 }
@@ -92,23 +103,32 @@ func (d *delegationCommander) delegationsList(cmd *cobra.Command, args []string)
 // delegationRemove removes a public key from a specific role in a GUN
 func (d *delegationCommander) delegationRemove(cmd *cobra.Command, args []string) error {
 	if len(args) < 2 {
+		cmd.Usage()
 		return fmt.Errorf("must specify the Global Unique Name and the role of the delegation along with optional keyIDs and/or a list of paths to remove")
 	}
 
-	config := d.configGetter()
+	config, err := d.configGetter()
+	if err != nil {
+		return err
+	}
 
 	gun := args[0]
 	role := args[1]
 
+	// Check if role is valid delegation name before requiring any user input
+	if !data.IsDelegation(role) {
+		return fmt.Errorf("invalid delegation name %s", role)
+	}
+
 	// If we're only given the gun and the role, attempt to remove all data for this delegation
-	if len(args) == 2 && paths == nil {
-		removeAll = true
+	if len(args) == 2 && d.paths == nil {
+		d.removeAll = true
 	}
 
 	keyIDs := []string{}
 	// Change nil paths to empty slice for TUF
-	if paths == nil {
-		paths = []string{}
+	if d.paths == nil {
+		d.paths = []string{}
 	}
 
 	if len(args) > 2 {
@@ -117,15 +137,16 @@ func (d *delegationCommander) delegationRemove(cmd *cobra.Command, args []string
 
 	// no online operations are performed by add so the transport argument
 	// should be nil
-	nRepo, err := notaryclient.NewNotaryRepository(config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, retriever)
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, d.retriever)
 	if err != nil {
 		return err
 	}
 
-	if removeAll {
+	if d.removeAll {
 		cmd.Println("\nAre you sure you want to remove all data for this delegation? (yes/no)")
 		// Ask for confirmation before force removing delegation
-		if !removeYes {
+		if !d.removeYes {
 			confirmed := askConfirm()
 			if !confirmed {
 				fatalf("Aborting action.")
@@ -133,20 +154,27 @@ func (d *delegationCommander) delegationRemove(cmd *cobra.Command, args []string
 		} else {
 			cmd.Println("Confirmed `yes` from flag")
 		}
+		// Delete the entire delegation
+		err = nRepo.RemoveDelegationRole(role)
+		if err != nil {
+			return fmt.Errorf("failed to remove delegation: %v", err)
+		}
+	} else {
+		// Remove any keys or paths that we passed in
+		err = nRepo.RemoveDelegationKeysAndPaths(role, keyIDs, d.paths)
+		if err != nil {
+			return fmt.Errorf("failed to remove delegation: %v", err)
+		}
 	}
 
-	// Remove the delegation from the repository
-	err = nRepo.RemoveDelegation(role, keyIDs, paths, removeAll)
-	if err != nil {
-		return fmt.Errorf("failed to remove delegation: %v", err)
-	}
 	cmd.Println("")
-	if removeAll {
+	if d.removeAll {
 		cmd.Printf("Forced removal (including all keys and paths) of delegation role %s to repository \"%s\" staged for next publish.\n", role, gun)
+	} else {
+		cmd.Printf(
+			"Removal of delegation role %s with keys %s and paths %s, to repository \"%s\" staged for next publish.\n",
+			role, keyIDs, d.paths, gun)
 	}
-	cmd.Printf(
-		"Removal of delegation role %s with keys %s and paths %s, to repository \"%s\" staged for next publish.\n",
-		role, keyIDs, paths, gun)
 	cmd.Println("")
 
 	return nil
@@ -154,11 +182,15 @@ func (d *delegationCommander) delegationRemove(cmd *cobra.Command, args []string
 
 // delegationAdd creates a new delegation by adding a public key from a certificate to a specific role in a GUN
 func (d *delegationCommander) delegationAdd(cmd *cobra.Command, args []string) error {
-	if len(args) < 2 || len(args) < 3 && paths == nil {
+	if len(args) < 2 || len(args) < 3 && d.paths == nil {
+		cmd.Usage()
 		return fmt.Errorf("must specify the Global Unique Name and the role of the delegation along with the public key certificate paths and/or a list of paths to add")
 	}
 
-	config := d.configGetter()
+	config, err := d.configGetter()
+	if err != nil {
+		return err
+	}
 
 	gun := args[0]
 	role := args[1]
@@ -184,15 +216,14 @@ func (d *delegationCommander) delegationAdd(cmd *cobra.Command, args []string) e
 
 	// no online operations are performed by add so the transport argument
 	// should be nil
-	nRepo, err := notaryclient.NewNotaryRepository(config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, retriever)
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, d.retriever)
 	if err != nil {
 		return err
 	}
 
 	// Add the delegation to the repository
-	// Sets threshold to 1 since we only added one key - thresholds are not currently fully supported, though
-	// one can use additional client-side validation to check for signatures from a quorum of varying delegation roles
-	err = nRepo.AddDelegation(role, notary.MinThreshold, pubKeys, paths)
+	err = nRepo.AddDelegation(role, pubKeys, d.paths)
 	if err != nil {
 		return fmt.Errorf("failed to create delegation: %v", err)
 	}
@@ -200,13 +231,17 @@ func (d *delegationCommander) delegationAdd(cmd *cobra.Command, args []string) e
 	// Make keyID slice for better CLI print
 	pubKeyIDs := []string{}
 	for _, pubKey := range pubKeys {
-		pubKeyIDs = append(pubKeyIDs, pubKey.ID())
+		pubKeyID, err := utils.CanonicalKeyID(pubKey)
+		if err != nil {
+			return err
+		}
+		pubKeyIDs = append(pubKeyIDs, pubKeyID)
 	}
 
 	cmd.Println("")
 	cmd.Printf(
 		"Addition of delegation role %s with keys %s and paths %s, to repository \"%s\" staged for next publish.\n",
-		role, pubKeyIDs, paths, gun)
+		role, pubKeyIDs, d.paths, gun)
 	cmd.Println("")
 	return nil
 }

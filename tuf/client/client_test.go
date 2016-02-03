@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -22,8 +23,8 @@ func TestRotation(t *testing.T) {
 	kdb := keys.NewDB()
 	signer := signed.NewEd25519()
 	repo := tuf.NewRepo(kdb, signer)
-	remote := store.NewMemoryStore(nil, nil)
-	cache := store.NewMemoryStore(nil, nil)
+	remote := store.NewMemoryStore(nil)
+	cache := store.NewMemoryStore(nil)
 
 	// Generate initial root key and role and add to key DB
 	rootKey, err := signer.Create("root", data.ED25519Key)
@@ -77,8 +78,8 @@ func TestRotationNewSigMissing(t *testing.T) {
 	kdb := keys.NewDB()
 	signer := signed.NewEd25519()
 	repo := tuf.NewRepo(kdb, signer)
-	remote := store.NewMemoryStore(nil, nil)
-	cache := store.NewMemoryStore(nil, nil)
+	remote := store.NewMemoryStore(nil)
+	cache := store.NewMemoryStore(nil)
 
 	// Generate initial root key and role and add to key DB
 	rootKey, err := signer.Create("root", data.ED25519Key)
@@ -138,8 +139,8 @@ func TestRotationOldSigMissing(t *testing.T) {
 	kdb := keys.NewDB()
 	signer := signed.NewEd25519()
 	repo := tuf.NewRepo(kdb, signer)
-	remote := store.NewMemoryStore(nil, nil)
-	cache := store.NewMemoryStore(nil, nil)
+	remote := store.NewMemoryStore(nil)
+	cache := store.NewMemoryStore(nil)
 
 	// Generate initial root key and role and add to key DB
 	rootKey, err := signer.Create("root", data.ED25519Key)
@@ -196,7 +197,7 @@ func TestRotationOldSigMissing(t *testing.T) {
 
 func TestCheckRootExpired(t *testing.T) {
 	repo := tuf.NewRepo(nil, nil)
-	storage := store.NewMemoryStore(nil, nil)
+	storage := store.NewMemoryStore(nil)
 	client := NewClient(repo, storage, nil, storage)
 
 	root := &data.SignedRoot{}
@@ -233,14 +234,13 @@ func TestCheckRootExpired(t *testing.T) {
 
 func TestChecksumMismatch(t *testing.T) {
 	repo := tuf.NewRepo(nil, nil)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := testutils.NewCorruptingMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, nil, localStorage)
 
 	sampleTargets := data.NewTargets()
 	orig, err := json.Marshal(sampleTargets)
 	origSha256 := sha256.Sum256(orig)
-	orig[0] = '}' // corrupt data, should be a {
 	assert.NoError(t, err)
 
 	remoteStorage.SetMeta("targets", orig)
@@ -251,8 +251,8 @@ func TestChecksumMismatch(t *testing.T) {
 
 func TestChecksumMatch(t *testing.T) {
 	repo := tuf.NewRepo(nil, nil)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, nil, localStorage)
 
 	sampleTargets := data.NewTargets()
@@ -268,8 +268,8 @@ func TestChecksumMatch(t *testing.T) {
 
 func TestSizeMismatchLong(t *testing.T) {
 	repo := tuf.NewRepo(nil, nil)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := testutils.NewLongMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, nil, localStorage)
 
 	sampleTargets := data.NewTargets()
@@ -277,9 +277,6 @@ func TestSizeMismatchLong(t *testing.T) {
 	origSha256 := sha256.Sum256(orig)
 	assert.NoError(t, err)
 	l := int64(len(orig))
-
-	orig = append([]byte(" "), orig...)
-	assert.Equal(t, l+1, int64(len(orig)))
 
 	remoteStorage.SetMeta("targets", orig)
 
@@ -291,8 +288,8 @@ func TestSizeMismatchLong(t *testing.T) {
 
 func TestSizeMismatchShort(t *testing.T) {
 	repo := tuf.NewRepo(nil, nil)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := testutils.NewShortMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, nil, localStorage)
 
 	sampleTargets := data.NewTargets()
@@ -300,8 +297,6 @@ func TestSizeMismatchShort(t *testing.T) {
 	origSha256 := sha256.Sum256(orig)
 	assert.NoError(t, err)
 	l := int64(len(orig))
-
-	orig = orig[1:]
 
 	remoteStorage.SetMeta("targets", orig)
 
@@ -314,8 +309,8 @@ func TestSizeMismatchShort(t *testing.T) {
 func TestDownloadTargetsHappy(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	signedOrig, err := repo.SignTargets("targets", data.DefaultExpires("targets"))
@@ -332,11 +327,56 @@ func TestDownloadTargetsHappy(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestDownloadTargetsLarge: Check that we can download very large targets metadata files,
+// which may be caused by adding a large number of targets.
+// This test is slow, so it will not run in short mode.
+func TestDownloadTargetsLarge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+
+	hash := sha256.Sum256([]byte{})
+	f := data.FileMeta{
+		Length: 1,
+		Hashes: map[string][]byte{
+			"sha256": hash[:],
+		},
+	}
+	// Add a ton of target files to the targets role to make this targets metadata huge
+	// 75,000 targets results in > 5MB (~6.5MB on recent runs)
+	for i := 0; i < 75000; i++ {
+		_, err = repo.AddTargets(data.CanonicalTargetsRole, data.Files{strconv.Itoa(i): f})
+		assert.NoError(t, err)
+	}
+
+	signedOrig, err := repo.SignTargets("targets", data.DefaultExpires("targets"))
+	assert.NoError(t, err)
+	orig, err := json.Marshal(signedOrig)
+	assert.NoError(t, err)
+	err = remoteStorage.SetMeta("targets", orig)
+	assert.NoError(t, err)
+
+	// call repo.SignSnapshot to update the targets role in the snapshot
+	repo.SignSnapshot(data.DefaultExpires("snapshot"))
+
+	// Clear the cache to force an online download
+	client.cache.RemoveAll()
+
+	err = client.downloadTargets("targets")
+	assert.NoError(t, err)
+}
+
 func TestDownloadTargetsDeepHappy(t *testing.T) {
 	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	delegations := []string{
@@ -410,8 +450,8 @@ func TestDownloadTargetsDeepHappy(t *testing.T) {
 func TestDownloadTargetChecksumMismatch(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := testutils.NewCorruptingMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample targets
@@ -420,13 +460,10 @@ func TestDownloadTargetChecksumMismatch(t *testing.T) {
 	orig, err := json.Marshal(signedOrig)
 	assert.NoError(t, err)
 	origSha256 := sha256.Sum256(orig)
-	orig[0] = '}' // corrupt data, should be a {
 	err = remoteStorage.SetMeta("targets", orig)
 	assert.NoError(t, err)
 
 	// create local snapshot with targets file
-	// It's necessary to do it this way rather than calling repo.SignSnapshot
-	// so that we have the wrong sha256 in the snapshot.
 	snap := data.SignedSnapshot{
 		Signed: data.Snapshot{
 			Meta: data.Files{
@@ -451,8 +488,8 @@ func TestDownloadTargetChecksumMismatch(t *testing.T) {
 func TestDownloadTargetsNoChecksum(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample targets
@@ -474,8 +511,8 @@ func TestDownloadTargetsNoChecksum(t *testing.T) {
 func TestDownloadTargetsNoSnapshot(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample targets
@@ -495,8 +532,8 @@ func TestDownloadTargetsNoSnapshot(t *testing.T) {
 func TestBootstrapDownloadRootHappy(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample root
@@ -517,8 +554,8 @@ func TestBootstrapDownloadRootHappy(t *testing.T) {
 func TestUpdateDownloadRootHappy(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample root, snapshot, and timestamp
@@ -537,35 +574,59 @@ func TestUpdateDownloadRootHappy(t *testing.T) {
 }
 
 func TestUpdateDownloadRootBadChecksum(t *testing.T) {
+	remoteStore := testutils.NewCorruptingMemoryStore(nil)
+
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	localStorage := store.NewMemoryStore(nil)
+	client := NewClient(repo, remoteStore, kdb, localStorage)
 
-	// sign snapshot to make sure we have a checksum for root
-	_, err = repo.SignSnapshot(data.DefaultExpires("snapshot"))
-	assert.NoError(t, err)
-
-	// create and "upload" sample root, snapshot, and timestamp
+	// sign and "upload" sample root
 	signedOrig, err := repo.SignRoot(data.DefaultExpires("root"))
 	assert.NoError(t, err)
 	orig, err := json.Marshal(signedOrig)
 	assert.NoError(t, err)
-	err = remoteStorage.SetMeta("root", orig)
+	err = remoteStore.SetMeta("root", orig)
 	assert.NoError(t, err)
 
-	// don't sign snapshot again to ensure checksum is out of date (bad)
+	// sign snapshot to make sure we have current checksum for root
+	_, err = repo.SignSnapshot(data.DefaultExpires("snapshot"))
+	assert.NoError(t, err)
 
 	err = client.downloadRoot()
 	assert.IsType(t, ErrChecksumMismatch{}, err)
 }
 
+func TestUpdateDownloadRootChecksumNotFound(t *testing.T) {
+	remoteStore := store.NewMemoryStore(nil)
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(nil)
+	client := NewClient(repo, remoteStore, kdb, localStorage)
+
+	// sign snapshot to make sure we have current checksum for root
+	_, err = repo.SignSnapshot(data.DefaultExpires("snapshot"))
+	assert.NoError(t, err)
+
+	// sign and "upload" sample root
+	signedOrig, err := repo.SignRoot(data.DefaultExpires("root"))
+	assert.NoError(t, err)
+	orig, err := json.Marshal(signedOrig)
+	assert.NoError(t, err)
+	err = remoteStore.SetMeta("root", orig)
+	assert.NoError(t, err)
+
+	// don't sign snapshot again to ensure checksum is out of date (bad)
+
+	err = client.downloadRoot()
+	assert.IsType(t, store.ErrMetaNotFound{}, err)
+}
+
 func TestDownloadTimestampHappy(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample timestamp
@@ -583,8 +644,8 @@ func TestDownloadTimestampHappy(t *testing.T) {
 func TestDownloadSnapshotHappy(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample snapshot and timestamp
@@ -606,13 +667,56 @@ func TestDownloadSnapshotHappy(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestDownloadSnapshotLarge: Check that we can download very large snapshot metadata files,
+// which may be caused by adding a large number of delegations.
+// This test is slow, so it will not run in short mode.
+func TestDownloadSnapshotLarge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+
+	// Add a ton of empty delegation roles to targets to make snapshot data huge
+	// This can also be done by adding legitimate delegations but it will be much slower
+	// 75,000 delegation roles results in > 5MB (~7.3MB on recent runs)
+	for i := 0; i < 75000; i++ {
+		newRole := &data.SignedTargets{}
+		repo.Targets[fmt.Sprintf("targets/%d", i)] = newRole
+	}
+
+	// create and "upload" sample snapshot and timestamp
+	signedOrig, err := repo.SignSnapshot(data.DefaultExpires("snapshot"))
+	assert.NoError(t, err)
+	orig, err := json.Marshal(signedOrig)
+	assert.NoError(t, err)
+	err = remoteStorage.SetMeta("snapshot", orig)
+	assert.NoError(t, err)
+
+	signedOrig, err = repo.SignTimestamp(data.DefaultExpires("timestamp"))
+	assert.NoError(t, err)
+	orig, err = json.Marshal(signedOrig)
+	assert.NoError(t, err)
+	err = remoteStorage.SetMeta("timestamp", orig)
+	assert.NoError(t, err)
+
+	// Clear the cache to force an online download
+	client.cache.RemoveAll()
+
+	err = client.downloadSnapshot()
+	assert.NoError(t, err)
+}
+
 // TestDownloadSnapshotNoChecksum: It should never be valid to download a
 // snapshot if we don't have a checksum
 func TestDownloadSnapshotNoTimestamp(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample snapshot and timestamp
@@ -632,8 +736,8 @@ func TestDownloadSnapshotNoTimestamp(t *testing.T) {
 func TestDownloadSnapshotNoChecksum(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// create and "upload" sample snapshot and timestamp
@@ -650,11 +754,11 @@ func TestDownloadSnapshotNoChecksum(t *testing.T) {
 	assert.IsType(t, ErrMissingMeta{}, err)
 }
 
-func TestDownloadSnapshotBadChecksum(t *testing.T) {
+func TestDownloadSnapshotChecksumNotFound(t *testing.T) {
 	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
-	remoteStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, remoteStorage, kdb, localStorage)
 
 	// sign timestamp to ensure it has a checksum for snapshot
@@ -672,7 +776,7 @@ func TestDownloadSnapshotBadChecksum(t *testing.T) {
 	// by not signing timestamp again we ensure it has the wrong checksum
 
 	err = client.downloadSnapshot()
-	assert.IsType(t, ErrChecksumMismatch{}, err)
+	assert.IsType(t, store.ErrMetaNotFound{}, err)
 }
 
 // TargetMeta returns the file metadata for a file path in the role subtree,
@@ -682,7 +786,7 @@ func TestDownloadSnapshotBadChecksum(t *testing.T) {
 func TestTargetMeta(t *testing.T) {
 	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil, nil)
+	localStorage := store.NewMemoryStore(nil)
 	client := NewClient(repo, nil, kdb, localStorage)
 
 	delegations := []string{
@@ -729,4 +833,97 @@ func TestTargetMeta(t *testing.T) {
 	fileMeta, role = client.TargetMeta("targets/level1/a", "2")
 	assert.Equal(t, &f, fileMeta)
 	assert.Equal(t, "targets/level1/a/i", role)
+}
+
+// If there is no local cache and also no remote timestamp, downloading the timestamp
+// fails with a store.ErrMetaNotFound
+func TestDownloadTimestampNoTimestamps(t *testing.T) {
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(nil)
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+
+	err = client.downloadTimestamp()
+	assert.Error(t, err)
+	notFoundErr, ok := err.(store.ErrMetaNotFound)
+	assert.True(t, ok)
+	assert.Equal(t, data.CanonicalTimestampRole, notFoundErr.Resource)
+}
+
+// If there is no local cache and the remote timestamp is empty, downloading the timestamp
+// fails with a store.ErrMetaNotFound
+func TestDownloadTimestampNoLocalTimestampRemoteTimestampEmpty(t *testing.T) {
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(nil)
+	remoteStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: {}})
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+
+	err = client.downloadTimestamp()
+	assert.Error(t, err)
+	assert.IsType(t, &json.SyntaxError{}, err)
+}
+
+// If there is no local cache and the remote timestamp is invalid, downloading the timestamp
+// fails with a store.ErrMetaNotFound
+func TestDownloadTimestampNoLocalTimestampRemoteTimestampInvalid(t *testing.T) {
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(nil)
+
+	// add a timestamp to the remote cache
+	tsSigned, err := repo.SignTimestamp(data.DefaultExpires("timestamp"))
+	assert.NoError(t, err)
+	tsSigned.Signatures[0].Signature = []byte("12345") // invalidate the signature
+	ts, err := json.Marshal(tsSigned)
+	assert.NoError(t, err)
+	remoteStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
+
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	err = client.downloadTimestamp()
+	assert.Error(t, err)
+	assert.IsType(t, signed.ErrRoleThreshold{}, err)
+}
+
+// If there is is a local cache and no remote timestamp, we fall back on the cached timestamp
+func TestDownloadTimestampLocalTimestampNoRemoteTimestamp(t *testing.T) {
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+
+	// add a timestamp to the local cache
+	tsSigned, err := repo.SignTimestamp(data.DefaultExpires("timestamp"))
+	assert.NoError(t, err)
+	ts, err := json.Marshal(tsSigned)
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
+
+	remoteStorage := store.NewMemoryStore(nil)
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+
+	err = client.downloadTimestamp()
+	assert.NoError(t, err)
+}
+
+// If there is is a local cache and the remote timestamp is invalid, we fall back on the cached timestamp
+func TestDownloadTimestampLocalTimestampInvalidRemoteTimestamp(t *testing.T) {
+	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	assert.NoError(t, err)
+
+	// add a timestamp to the local cache
+	tsSigned, err := repo.SignTimestamp(data.DefaultExpires("timestamp"))
+	assert.NoError(t, err)
+	ts, err := json.Marshal(tsSigned)
+	assert.NoError(t, err)
+	localStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
+
+	// add a timestamp to the remote cache
+	tsSigned.Signatures[0].Signature = []byte("12345") // invalidate the signature
+	ts, err = json.Marshal(tsSigned)
+	assert.NoError(t, err)
+	remoteStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
+
+	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	err = client.downloadTimestamp()
+	assert.NoError(t, err)
 }

@@ -6,11 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"path"
-	"strings"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/notary"
 	tuf "github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/tuf/keys"
@@ -18,8 +16,6 @@ import (
 	"github.com/docker/notary/tuf/store"
 	"github.com/docker/notary/tuf/utils"
 )
-
-const maxSize int64 = 5 << 20
 
 // Client is a usability wrapper around a raw TUF repo
 type Client struct {
@@ -54,7 +50,7 @@ func (c *Client) Update() error {
 	if err != nil {
 		logrus.Debug("Error occurred. Root will be downloaded and another update attempted")
 		if err := c.downloadRoot(); err != nil {
-			logrus.Error("Client Update (Root):", err)
+			logrus.Debug("Client Update (Root):", err)
 			return err
 		}
 		// If we error again, we now have the latest root and just want to fail
@@ -68,12 +64,12 @@ func (c *Client) Update() error {
 func (c *Client) update() error {
 	err := c.downloadTimestamp()
 	if err != nil {
-		logrus.Errorf("Client Update (Timestamp): %s", err.Error())
+		logrus.Debugf("Client Update (Timestamp): %s", err.Error())
 		return err
 	}
 	err = c.downloadSnapshot()
 	if err != nil {
-		logrus.Errorf("Client Update (Snapshot): %s", err.Error())
+		logrus.Debugf("Client Update (Snapshot): %s", err.Error())
 		return err
 	}
 	err = c.checkRoot()
@@ -86,7 +82,7 @@ func (c *Client) update() error {
 	// will always need top level targets at a minimum
 	err = c.downloadTargets("targets")
 	if err != nil {
-		logrus.Errorf("Client Update (Targets): %s", err.Error())
+		logrus.Debugf("Client Update (Targets): %s", err.Error())
 		return err
 	}
 	return nil
@@ -131,7 +127,9 @@ func (c Client) checkRoot() error {
 func (c *Client) downloadRoot() error {
 	logrus.Debug("Downloading Root...")
 	role := data.CanonicalRootRole
-	size := maxSize
+	// We can't read an exact size for the root metadata without risking getting stuck in the TUF update cycle
+	// since it's possible that downloading timestamp/snapshot metadata may fail due to a signature mismatch
+	var size int64 = -1
 	var expectedSha256 []byte
 	if c.local.Snapshot != nil {
 		size = c.local.Snapshot.Signed.Meta[role].Length
@@ -178,6 +176,7 @@ func (c *Client) downloadRoot() error {
 	var s *data.Signed
 	var raw []byte
 	if download {
+		// use consistent download if we have the checksum.
 		raw, s, err = c.downloadSigned(role, size, expectedSha256)
 		if err != nil {
 			return err
@@ -248,11 +247,11 @@ func (c *Client) downloadTimestamp() error {
 	// we're interacting with the repo. This will result in the
 	// version being 0
 	var (
-		saveToCache bool
-		old         *data.Signed
-		version     = 0
+		old     *data.Signed
+		ts      *data.SignedTimestamp
+		version = 0
 	)
-	cachedTS, err := c.cache.GetMeta(role, maxSize)
+	cachedTS, err := c.cache.GetMeta(role, notary.MaxTimestampSize)
 	if err == nil {
 		cached := &data.Signed{}
 		err := json.Unmarshal(cachedTS, cached)
@@ -266,36 +265,38 @@ func (c *Client) downloadTimestamp() error {
 	}
 	// unlike root, targets and snapshot, always try and download timestamps
 	// from remote, only using the cache one if we couldn't reach remote.
-	raw, s, err := c.downloadSigned(role, maxSize, nil)
-	if err != nil || len(raw) == 0 {
-		if old == nil {
-			if err == nil {
-				// couldn't retrieve data from server and don't have valid
-				// data in cache.
-				return store.ErrMetaNotFound{Resource: data.CanonicalTimestampRole}
-			}
-			return err
+	raw, s, err := c.downloadSigned(role, notary.MaxTimestampSize, nil)
+	if err == nil {
+		ts, err = c.verifyTimestamp(s, version, c.keysDB)
+		if err == nil {
+			logrus.Debug("successfully verified downloaded timestamp")
+			c.cache.SetMeta(role, raw)
+			c.local.SetTimestamp(ts)
+			return nil
 		}
-		logrus.Debug(err.Error())
-		logrus.Warn("Error while downloading remote metadata, using cached timestamp - this might not be the latest version available remotely")
-		s = old
-	} else {
-		saveToCache = true
 	}
-	err = signed.Verify(s, role, version, c.keysDB)
+	if old == nil {
+		// couldn't retrieve valid data from server and don't have unmarshallable data in cache.
+		logrus.Debug("no cached timestamp available")
+		return err
+	}
+	logrus.Debug(err.Error())
+	logrus.Warn("Error while downloading remote metadata, using cached timestamp - this might not be the latest version available remotely")
+	ts, err = c.verifyTimestamp(old, version, c.keysDB)
 	if err != nil {
 		return err
 	}
-	logrus.Debug("successfully verified timestamp")
-	if saveToCache {
-		c.cache.SetMeta(role, raw)
-	}
-	ts, err := data.TimestampFromSigned(s)
-	if err != nil {
-		return err
-	}
+	logrus.Debug("successfully verified cached timestamp")
 	c.local.SetTimestamp(ts)
 	return nil
+}
+
+// verifies that a timestamp is valid, and returned the SignedTimestamp object to add to the tuf repo
+func (c *Client) verifyTimestamp(s *data.Signed, minVersion int, kdb *keys.KeyDB) (*data.SignedTimestamp, error) {
+	if err := signed.Verify(s, data.CanonicalTimestampRole, minVersion, kdb); err != nil {
+		return nil, err
+	}
+	return data.TimestampFromSigned(s)
 }
 
 // downloadSnapshot is responsible for downloading the snapshot.json
@@ -419,7 +420,8 @@ func (c *Client) downloadTargets(role string) error {
 }
 
 func (c *Client) downloadSigned(role string, size int64, expectedSha256 []byte) ([]byte, *data.Signed, error) {
-	raw, err := c.remote.GetMeta(role, size)
+	rolePath := utils.ConsistentName(role, expectedSha256)
+	raw, err := c.remote.GetMeta(rolePath, size)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -478,11 +480,7 @@ func (c Client) getTargetsFile(role string, keyIDs []string, snapshotMeta data.F
 	size := snapshotMeta[role].Length
 	var s *data.Signed
 	if download {
-		rolePath, err := c.RoleTargetsPath(role, hex.EncodeToString(expectedSha256), consistent)
-		if err != nil {
-			return nil, err
-		}
-		raw, s, err = c.downloadSigned(rolePath, size, expectedSha256)
+		raw, s, err = c.downloadSigned(role, size, expectedSha256)
 		if err != nil {
 			return nil, err
 		}
@@ -504,24 +502,6 @@ func (c Client) getTargetsFile(role string, keyIDs []string, snapshotMeta data.F
 		}
 	}
 	return s, nil
-}
-
-// RoleTargetsPath generates the appropriate HTTP URL for the targets file,
-// based on whether the repo is marked as consistent.
-func (c Client) RoleTargetsPath(role string, hashSha256 string, consistent bool) (string, error) {
-	if consistent {
-		// Use path instead of filepath since we refer to the TUF role directly instead of its target files
-		dir := path.Dir(role)
-		if strings.Contains(role, "/") {
-			lastSlashIdx := strings.LastIndex(role, "/")
-			role = role[lastSlashIdx+1:]
-		}
-		role = path.Join(
-			dir,
-			fmt.Sprintf("%s.%s.json", hashSha256, role),
-		)
-	}
-	return role, nil
 }
 
 // TargetMeta ensures the repo is up to date. It assumes downloadTargets
@@ -559,19 +539,4 @@ func (c Client) TargetMeta(role, path string, excludeRoles ...string) (*data.Fil
 		}
 	}
 	return meta, ""
-}
-
-// DownloadTarget downloads the target to dst from the remote
-func (c Client) DownloadTarget(dst io.Writer, path string, meta *data.FileMeta) error {
-	reader, err := c.remote.GetTarget(path)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	r := io.TeeReader(
-		io.LimitReader(reader, meta.Length),
-		dst,
-	)
-	err = utils.ValidateTarget(r, meta)
-	return err
 }

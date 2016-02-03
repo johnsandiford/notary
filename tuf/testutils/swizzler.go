@@ -5,17 +5,13 @@ import (
 	"path"
 	"time"
 
+	"github.com/docker/go/canonical/json"
 	"github.com/docker/notary/cryptoservice"
 	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/store"
-	"github.com/jfrazelle/go/canonical/json"
-)
-
-const (
-	maxSize = 5 << 20
 )
 
 // ErrNoKeyForRole returns an error when the cryptoservice provided to
@@ -36,21 +32,9 @@ type MetadataSwizzler struct {
 	Roles         []string // list of Roles in the metadataStore
 }
 
-// signs the new metadata, replacing whatever signature was there
-func serializeMetadata(cs signed.CryptoService, s *data.Signed, role string,
-	pubKeys ...data.PublicKey) ([]byte, error) {
-
-	// delete the existing signatures
-	s.Signatures = []data.Signature{}
-
-	if len(pubKeys) > 0 {
-		if err := signed.Sign(cs, s, pubKeys...); err != nil {
-			if _, ok := err.(signed.ErrNoKeys); ok {
-				return nil, ErrNoKeyForRole{Role: role}
-			}
-			return nil, err
-		}
-	} else if role == data.CanonicalRootRole {
+func getPubKeys(cs signed.CryptoService, s *data.Signed, role string) ([]data.PublicKey, error) {
+	var pubKeys []data.PublicKey
+	if role == data.CanonicalRootRole {
 		// if this is root metadata, we have to get the keys from the root because they
 		// are certs
 		root := &data.Root{}
@@ -58,23 +42,36 @@ func serializeMetadata(cs signed.CryptoService, s *data.Signed, role string,
 			return nil, err
 		}
 		for _, pubKeyID := range root.Roles[data.CanonicalRootRole].KeyIDs {
-			if err := signed.Sign(cs, s, root.Keys[pubKeyID]); err != nil {
-				if _, ok := err.(signed.ErrNoKeys); ok {
-					return nil, ErrNoKeyForRole{Role: role}
-				}
-				return nil, err
-			}
+			pubKeys = append(pubKeys, root.Keys[pubKeyID])
 		}
 	} else {
 		pubKeyIDs := cs.ListKeys(role)
-		if len(pubKeyIDs) < 1 {
-			return nil, ErrNoKeyForRole{role}
-		}
 		for _, pubKeyID := range pubKeyIDs {
-			if err := signed.Sign(cs, s, cs.GetKey(pubKeyID)); err != nil {
-				return nil, err
+			pubKey := cs.GetKey(pubKeyID)
+			if pubKey != nil {
+				pubKeys = append(pubKeys, pubKey)
 			}
 		}
+	}
+	return pubKeys, nil
+}
+
+// signs the new metadata, replacing whatever signature was there
+func serializeMetadata(cs signed.CryptoService, s *data.Signed, role string,
+	pubKeys ...data.PublicKey) ([]byte, error) {
+
+	// delete the existing signatures
+	s.Signatures = []data.Signature{}
+
+	if len(pubKeys) < 1 {
+		return nil, ErrNoKeyForRole{role}
+	}
+
+	if err := signed.Sign(cs, s, pubKeys...); err != nil {
+		if _, ok := err.(signed.ErrNoKeys); ok {
+			return nil, ErrNoKeyForRole{Role: role}
+		}
+		return nil, err
 	}
 
 	metaBytes, err := json.Marshal(s)
@@ -87,7 +84,7 @@ func serializeMetadata(cs signed.CryptoService, s *data.Signed, role string,
 
 // gets a Signed from the metadata store
 func signedFromStore(cache store.MetadataStore, role string) (*data.Signed, error) {
-	b, err := cache.GetMeta(role, maxSize)
+	b, err := cache.GetMeta(role, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +109,7 @@ func NewMetadataSwizzler(gun string, initialMetadata map[string][]byte,
 
 	return &MetadataSwizzler{
 		Gun:           gun,
-		MetadataCache: store.NewMemoryStore(initialMetadata, nil),
+		MetadataCache: store.NewMemoryStore(initialMetadata),
 		CryptoService: cryptoService,
 		Roles:         roles,
 	}
@@ -120,11 +117,23 @@ func NewMetadataSwizzler(gun string, initialMetadata map[string][]byte,
 
 // SetInvalidJSON corrupts metadata into something that is no longer valid JSON
 func (m *MetadataSwizzler) SetInvalidJSON(role string) error {
-	metaBytes, err := m.MetadataCache.GetMeta(role, maxSize)
+	metaBytes, err := m.MetadataCache.GetMeta(role, -1)
 	if err != nil {
 		return err
 	}
 	return m.MetadataCache.SetMeta(role, metaBytes[5:])
+}
+
+// AddExtraSpace adds an extra space to the beginning and end of the serialized
+// JSON bytes, which should not affect serialization, but will change the checksum
+// of the file.
+func (m *MetadataSwizzler) AddExtraSpace(role string) error {
+	metaBytes, err := m.MetadataCache.GetMeta(role, -1)
+	if err != nil {
+		return err
+	}
+	newBytes := append(append([]byte{' '}, metaBytes...), ' ')
+	return m.MetadataCache.SetMeta(role, newBytes)
 }
 
 // SetInvalidSigned corrupts the metadata into something that is valid JSON,
@@ -152,6 +161,11 @@ func (m *MetadataSwizzler) SetInvalidSignedMeta(role string) error {
 		return err
 	}
 
+	pubKeys, err := getPubKeys(m.CryptoService, signedThing, role)
+	if err != nil {
+		return err
+	}
+
 	var unmarshalled map[string]interface{}
 	if err := json.Unmarshal(signedThing.Signed, &unmarshalled); err != nil {
 		return err
@@ -167,7 +181,7 @@ func (m *MetadataSwizzler) SetInvalidSignedMeta(role string) error {
 	}
 	signedThing.Signed = json.RawMessage(metaBytes)
 
-	metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role)
+	metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role, pubKeys...)
 	if err != nil {
 		return err
 	}
@@ -198,7 +212,11 @@ func (m *MetadataSwizzler) SetInvalidMetadataType(role string) error {
 	}
 	signedThing.Signed = json.RawMessage(metaBytes)
 
-	metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role)
+	pubKeys, err := getPubKeys(m.CryptoService, signedThing, role)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -283,7 +301,11 @@ func (m *MetadataSwizzler) OffsetMetadataVersion(role string, offset int) error 
 	}
 	signedThing.Signed = json.RawMessage(metaBytes)
 
-	metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role)
+	pubKeys, err := getPubKeys(m.CryptoService, signedThing, role)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -311,7 +333,11 @@ func (m *MetadataSwizzler) ExpireMetadata(role string) error {
 	}
 	signedThing.Signed = json.RawMessage(metaBytes)
 
-	metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role)
+	pubKeys, err := getPubKeys(m.CryptoService, signedThing, role)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, signedThing, role, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -327,7 +353,7 @@ func (m *MetadataSwizzler) SetThreshold(role string, newThreshold int) error {
 		roleSpecifier = path.Dir(role)
 	}
 
-	b, err := m.MetadataCache.GetMeta(roleSpecifier, maxSize)
+	b, err := m.MetadataCache.GetMeta(roleSpecifier, -1)
 	if err != nil {
 		return err
 	}
@@ -362,7 +388,12 @@ func (m *MetadataSwizzler) SetThreshold(role string, newThreshold int) error {
 		}
 	}
 
-	metaBytes, err := serializeMetadata(m.CryptoService, signedThing, roleSpecifier)
+	var metaBytes []byte
+	pubKeys, err := getPubKeys(m.CryptoService, signedThing, roleSpecifier)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, signedThing, roleSpecifier, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -377,7 +408,7 @@ func (m *MetadataSwizzler) ChangeRootKey() error {
 		return err
 	}
 
-	b, err := m.MetadataCache.GetMeta(data.CanonicalRootRole, maxSize)
+	b, err := m.MetadataCache.GetMeta(data.CanonicalRootRole, -1)
 	if err != nil {
 		return err
 	}
@@ -395,7 +426,12 @@ func (m *MetadataSwizzler) ChangeRootKey() error {
 		return err
 	}
 
-	metaBytes, err := serializeMetadata(m.CryptoService, signedThing, data.CanonicalRootRole)
+	var metaBytes []byte
+	pubKeys, err := getPubKeys(m.CryptoService, signedThing, data.CanonicalRootRole)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, signedThing, data.CanonicalRootRole, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -410,7 +446,7 @@ func (m *MetadataSwizzler) UpdateSnapshotHashes(roles ...string) error {
 		snapshotSigned *data.Signed
 		err            error
 	)
-	if metaBytes, err = m.MetadataCache.GetMeta(data.CanonicalSnapshotRole, maxSize); err != nil {
+	if metaBytes, err = m.MetadataCache.GetMeta(data.CanonicalSnapshotRole, -1); err != nil {
 		return err
 	}
 
@@ -426,7 +462,7 @@ func (m *MetadataSwizzler) UpdateSnapshotHashes(roles ...string) error {
 
 	for _, role := range roles {
 		if role != data.CanonicalSnapshotRole && role != data.CanonicalTimestampRole {
-			if metaBytes, err = m.MetadataCache.GetMeta(role, maxSize); err != nil {
+			if metaBytes, err = m.MetadataCache.GetMeta(role, -1); err != nil {
 				return err
 			}
 
@@ -442,7 +478,11 @@ func (m *MetadataSwizzler) UpdateSnapshotHashes(roles ...string) error {
 	if snapshotSigned, err = snapshot.ToSigned(); err != nil {
 		return err
 	}
-	metaBytes, err = serializeMetadata(m.CryptoService, snapshotSigned, data.CanonicalSnapshotRole)
+	pubKeys, err := getPubKeys(m.CryptoService, snapshotSigned, data.CanonicalSnapshotRole)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, snapshotSigned, data.CanonicalSnapshotRole, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -458,7 +498,7 @@ func (m *MetadataSwizzler) UpdateTimestampHash() error {
 		timestampSigned *data.Signed
 		err             error
 	)
-	if metaBytes, err = m.MetadataCache.GetMeta(data.CanonicalTimestampRole, maxSize); err != nil {
+	if metaBytes, err = m.MetadataCache.GetMeta(data.CanonicalTimestampRole, -1); err != nil {
 		return err
 	}
 	// we can't just create a new timestamp, because then the expiry would be
@@ -467,7 +507,7 @@ func (m *MetadataSwizzler) UpdateTimestampHash() error {
 		return err
 	}
 
-	if metaBytes, err = m.MetadataCache.GetMeta(data.CanonicalSnapshotRole, maxSize); err != nil {
+	if metaBytes, err = m.MetadataCache.GetMeta(data.CanonicalSnapshotRole, -1); err != nil {
 		return err
 	}
 
@@ -482,7 +522,11 @@ func (m *MetadataSwizzler) UpdateTimestampHash() error {
 	if err != nil {
 		return err
 	}
-	metaBytes, err = serializeMetadata(m.CryptoService, timestampSigned, data.CanonicalTimestampRole)
+	pubKeys, err := getPubKeys(m.CryptoService, timestampSigned, data.CanonicalTimestampRole)
+	if err == nil {
+		metaBytes, err = serializeMetadata(m.CryptoService, timestampSigned, data.CanonicalTimestampRole, pubKeys...)
+	}
+
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 func TestMemoryStore(t *testing.T) {
-	s := NewMemoryStore(nil, nil)
+	s := NewMemoryStore(nil)
 	_, err := s.GetMeta("nonexistent", 0)
 	require.Error(t, err)
 	require.IsType(t, ErrMetaNotFound{}, err)
@@ -18,6 +18,10 @@ func TestMemoryStore(t *testing.T) {
 	require.NoError(t, err)
 
 	meta, err := s.GetMeta("exists", metaSize)
+	require.NoError(t, err)
+	require.Equal(t, metaContent, meta)
+
+	meta, err = s.GetMeta("exists", -1)
 	require.NoError(t, err)
 	require.Equal(t, metaContent, meta)
 

@@ -11,11 +11,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/go/canonical/json"
+	"github.com/docker/notary"
 	"github.com/docker/notary/client"
 	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/tuf/data"
-	"github.com/jfrazelle/go/canonical/json"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -236,8 +237,8 @@ func TestRotateKeyInvalidRoles(t *testing.T) {
 	for _, role := range invalids {
 		for _, serverManaged := range []bool{true, false} {
 			k := &keyCommander{
-				configGetter:           viper.New,
-				retriever:              passphrase.ConstantRetriever("pass"),
+				configGetter:           func() (*viper.Viper, error) { return viper.New(), nil },
+				getRetriever:           func() passphrase.Retriever { return passphrase.ConstantRetriever("pass") },
 				rotateKeyRole:          role,
 				rotateKeyServerManaged: serverManaged,
 			}
@@ -252,8 +253,8 @@ func TestRotateKeyInvalidRoles(t *testing.T) {
 // Cannot rotate a targets key and require that the server manage it
 func TestRotateKeyTargetCannotBeServerManaged(t *testing.T) {
 	k := &keyCommander{
-		configGetter:           viper.New,
-		retriever:              passphrase.ConstantRetriever("pass"),
+		configGetter:           func() (*viper.Viper, error) { return viper.New(), nil },
+		getRetriever:           func() passphrase.Retriever { return passphrase.ConstantRetriever("pass") },
 		rotateKeyRole:          data.CanonicalTargetsRole,
 		rotateKeyServerManaged: true,
 	}
@@ -266,8 +267,8 @@ func TestRotateKeyTargetCannotBeServerManaged(t *testing.T) {
 // rotate key must be provided with a gun
 func TestRotateKeyNoGUN(t *testing.T) {
 	k := &keyCommander{
-		configGetter:  viper.New,
-		retriever:     passphrase.ConstantRetriever("pass"),
+		configGetter:  func() (*viper.Viper, error) { return viper.New(), nil },
+		getRetriever:  func() passphrase.Retriever { return passphrase.ConstantRetriever("pass") },
 		rotateKeyRole: data.CanonicalTargetsRole,
 	}
 	err := k.keysRotate(&cobra.Command{}, []string{})
@@ -320,13 +321,13 @@ func TestRotateKeyRemoteServerManagesKey(t *testing.T) {
 	defer ts.Close()
 
 	k := &keyCommander{
-		configGetter: func() *viper.Viper {
+		configGetter: func() (*viper.Viper, error) {
 			v := viper.New()
 			v.SetDefault("trust_dir", tempBaseDir)
 			v.SetDefault("remote_server.url", ts.URL)
-			return v
+			return v, nil
 		},
-		retriever:              ret,
+		getRetriever:           func() passphrase.Retriever { return ret },
 		rotateKeyRole:          data.CanonicalSnapshotRole,
 		rotateKeyServerManaged: true,
 	}
@@ -360,13 +361,13 @@ func TestRotateKeyBothKeys(t *testing.T) {
 	ts.Close()
 
 	k := &keyCommander{
-		configGetter: func() *viper.Viper {
+		configGetter: func() (*viper.Viper, error) {
 			v := viper.New()
 			v.SetDefault("trust_dir", tempBaseDir)
 			// won't need a remote server URL, since we are creating local keys
-			return v
+			return v, nil
 		},
-		retriever: ret,
+		getRetriever: func() passphrase.Retriever { return ret },
 	}
 	err = k.keysRotate(&cobra.Command{}, []string{gun})
 	assert.NoError(t, err)
@@ -400,4 +401,35 @@ func TestRotateKeyBothKeys(t *testing.T) {
 	}
 	assert.True(t, targetsFound, "targets key was not created")
 	assert.True(t, snapshotFound, "snapshot key was not created")
+}
+
+func TestChangeKeyPassphraseInvalidID(t *testing.T) {
+	k := &keyCommander{
+		configGetter: func() (*viper.Viper, error) { return viper.New(), nil },
+		getRetriever: func() passphrase.Retriever { return passphrase.ConstantRetriever("pass") },
+	}
+	err := k.keyPassphraseChange(&cobra.Command{}, []string{"too_short"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid key ID provided")
+}
+
+func TestChangeKeyPassphraseInvalidNumArgs(t *testing.T) {
+	k := &keyCommander{
+		configGetter: func() (*viper.Viper, error) { return viper.New(), nil },
+		getRetriever: func() passphrase.Retriever { return passphrase.ConstantRetriever("pass") },
+	}
+	err := k.keyPassphraseChange(&cobra.Command{}, []string{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must specify the key ID")
+}
+
+func TestChangeKeyPassphraseNonexistentID(t *testing.T) {
+	k := &keyCommander{
+		configGetter: func() (*viper.Viper, error) { return viper.New(), nil },
+		getRetriever: func() passphrase.Retriever { return passphrase.ConstantRetriever("pass") },
+	}
+	// Valid ID size, but does not exist as a key ID
+	err := k.keyPassphraseChange(&cobra.Command{}, []string{strings.Repeat("x", notary.Sha256HexSize)})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "could not retrieve local root key for key ID provided")
 }

@@ -1,6 +1,6 @@
 <!--[metadata]>
 +++
-title = "Notary Server"
+title = "Server Architecture"
 description = "Description of the Notary Server"
 keywords = ["docker, notary, notary-server"]
 [menu.main]
@@ -8,7 +8,7 @@ parent="mn_notary"
 +++
 <![end-metadata]-->
 
-# Notary Server
+# Notary Server Architecture
 
 The Notary Server stores and updates the signed
 [TUF metadata files](
@@ -35,7 +35,7 @@ and a cert bundle from this authorization server containing the public key it
 uses to sign tokens.
 
 If token authentication is enabled on Notary Server, then any client that
-does not have a token will be redirected to the authoriziation server.
+does not have a token will be redirected to the authorization server.
 The client will log in, obtain a token, and then present the token to
 Notary Server on future requests.
 
@@ -66,7 +66,7 @@ certificates for your deployment of Notary Server, please make
 sure that the certificates **are not CAs**.  Otherwise if the server is
 compromised, it can sign any number of other client certs.
 
-As an example, please see [this script](opensslCertGen.sh) to see how to
+As an example, please see [this script](https://github.com/docker/notary/blob/master/docs/opensslCertGen.sh) to see how to
 generate client SSL certs with basic constraints using OpenSSL.
 
 ### How to configure and run Notary Server
@@ -116,6 +116,9 @@ Configuration options:
 - `-debug` - Passing this flag enables the debugging server on `localhost:8080`.
 	The debugging server provides [pprof](https://golang.org/pkg/net/http/pprof/)
 	and [expvar](https://golang.org/pkg/expvar/) endpoints.
+
+- `-logf=<format>` - This flag sets the output format for the logs. Possible 
+    formats are "json" and "logfmt"
 
 
 Get the official Docker image, which comes with [some sane defaults](
@@ -185,5 +188,5 @@ Notary Server provides the following features for operational friendliness:
 1. A [Bugsnag](https://bugsnag.com) hook for error logs, if a Bugsnag
 	configuration is provided.
 
-1. A [prometheus](http://prometheus.io/) endpoint at `/_notary_server/metrics`
+1. A [prometheus](http://prometheus.io/) endpoint at `/metrics`
 	which provides HTTP stats.

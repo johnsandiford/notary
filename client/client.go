@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -23,10 +24,6 @@ import (
 	"github.com/docker/notary/tuf/keys"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/store"
-)
-
-const (
-	maxSize = 5 << 20
 )
 
 func init() {
@@ -118,7 +115,6 @@ func repositoryFromKeystores(baseDir, gun, baseURL string, rt http.RoundTripper,
 		nRepo.tufRepoPath,
 		"metadata",
 		"json",
-		"",
 	)
 	if err != nil {
 		return nil, err
@@ -305,96 +301,6 @@ func addChange(cl *changelist.FileChangelist, c changelist.Change, roles ...stri
 	return nil
 }
 
-// AddDelegation creates a new changelist entry to add a delegation to the repository
-// when the changelist gets applied at publish time.  This does not do any validation
-// other than checking the name of the delegation to add - all that will happen
-// at publish time.
-func (r *NotaryRepository) AddDelegation(name string, threshold int,
-	delegationKeys []data.PublicKey, paths []string) error {
-
-	if !data.IsDelegation(name) {
-		return data.ErrInvalidRole{Role: name, Reason: "invalid delegation role name"}
-	}
-
-	cl, err := changelist.NewFileChangelist(filepath.Join(r.tufRepoPath, "changelist"))
-	if err != nil {
-		return err
-	}
-	defer cl.Close()
-
-	logrus.Debugf(`Adding delegation "%s" with threshold %d, and %d keys\n`,
-		name, threshold, len(delegationKeys))
-
-	tdJSON, err := json.Marshal(&changelist.TufDelegation{
-		NewThreshold: threshold,
-		AddKeys:      data.KeyList(delegationKeys),
-		AddPaths:     paths,
-	})
-	if err != nil {
-		return err
-	}
-
-	template := changelist.NewTufChange(
-		changelist.ActionCreate,
-		name,
-		changelist.TypeTargetsDelegation,
-		"", // no path
-		tdJSON,
-	)
-
-	return addChange(cl, template, name)
-}
-
-// RemoveDelegation creates a new changelist entry to remove a delegation from
-// the repository when the changelist gets applied at publish time.
-// This does not validate that the delegation exists, since one might exist
-// after applying all changes.
-func (r *NotaryRepository) RemoveDelegation(name string, keyIDs, paths []string, removeAll bool) error {
-
-	if !data.IsDelegation(name) {
-		return data.ErrInvalidRole{Role: name, Reason: "invalid delegation role name"}
-	}
-
-	cl, err := changelist.NewFileChangelist(filepath.Join(r.tufRepoPath, "changelist"))
-	if err != nil {
-		return err
-	}
-	defer cl.Close()
-
-	logrus.Debugf(`Removing delegation "%s"\n`, name)
-	var template *changelist.TufChange
-
-	// We use the Delete action only for force removal, Update is used for removing individual keys and paths
-	if removeAll {
-		template = changelist.NewTufChange(
-			changelist.ActionDelete,
-			name,
-			changelist.TypeTargetsDelegation,
-			"",  // no path
-			nil, // deleting role, no data needed
-		)
-
-	} else {
-		tdJSON, err := json.Marshal(&changelist.TufDelegation{
-			RemoveKeys:  keyIDs,
-			RemovePaths: paths,
-		})
-		if err != nil {
-			return err
-		}
-
-		template = changelist.NewTufChange(
-			changelist.ActionUpdate,
-			name,
-			changelist.TypeTargetsDelegation,
-			"", // no path
-			tdJSON,
-		)
-	}
-
-	return addChange(cl, template, name)
-}
-
 // AddTarget creates new changelist entries to add a target to the given roles
 // in the repository when the changelist gets applied at publish time.
 // If roles are unspecified, the default role is "targets".
@@ -530,45 +436,6 @@ func (r *NotaryRepository) GetChangelist() (changelist.Changelist, error) {
 		return nil, err
 	}
 	return cl, nil
-}
-
-// GetDelegationRoles returns the keys and roles of the repository's delegations
-func (r *NotaryRepository) GetDelegationRoles() ([]*data.Role, error) {
-	// Update state of the repo to latest
-	if _, err := r.Update(false); err != nil {
-		return nil, err
-	}
-
-	// All top level delegations (ex: targets/level1) are stored exclusively in targets.json
-	targets, ok := r.tufRepo.Targets[data.CanonicalTargetsRole]
-	if !ok {
-		return nil, store.ErrMetaNotFound{Resource: data.CanonicalTargetsRole}
-	}
-
-	allDelegations := targets.Signed.Delegations.Roles
-
-	// make a copy for traversing nested delegations
-	delegationsList := make([]*data.Role, len(allDelegations))
-	copy(delegationsList, allDelegations)
-
-	// Now traverse to lower level delegations (ex: targets/level1/level2)
-	for len(delegationsList) > 0 {
-		// Pop off first delegation to traverse
-		delegation := delegationsList[0]
-		delegationsList = delegationsList[1:]
-
-		// Get metadata
-		delegationMeta, ok := r.tufRepo.Targets[delegation.Name]
-		// If we get an error, don't try to traverse further into this subtree because it doesn't exist or is malformed
-		if !ok {
-			continue
-		}
-
-		// Add nested delegations to return list and exploration list
-		allDelegations = append(allDelegations, delegationMeta.Signed.Delegations.Roles...)
-		delegationsList = append(delegationsList, delegationMeta.Signed.Delegations.Roles...)
-	}
-	return allDelegations, nil
 }
 
 // RoleWithSignatures is a Role with its associated signatures
@@ -747,7 +614,7 @@ func (r *NotaryRepository) bootstrapRepo() error {
 	tufRepo := tuf.NewRepo(kdb, r.CryptoService)
 
 	logrus.Debugf("Loading trusted collection.")
-	rootJSON, err := r.fileStore.GetMeta("root", 0)
+	rootJSON, err := r.fileStore.GetMeta("root", -1)
 	if err != nil {
 		return err
 	}
@@ -760,7 +627,7 @@ func (r *NotaryRepository) bootstrapRepo() error {
 	if err != nil {
 		return err
 	}
-	targetsJSON, err := r.fileStore.GetMeta("targets", 0)
+	targetsJSON, err := r.fileStore.GetMeta("targets", -1)
 	if err != nil {
 		return err
 	}
@@ -771,7 +638,7 @@ func (r *NotaryRepository) bootstrapRepo() error {
 	}
 	tufRepo.SetTargets("targets", targets)
 
-	snapshotJSON, err := r.fileStore.GetMeta("snapshot", 0)
+	snapshotJSON, err := r.fileStore.GetMeta("snapshot", -1)
 	if err == nil {
 		snapshot := &data.SignedSnapshot{}
 		err = json.Unmarshal(snapshotJSON, snapshot)
@@ -854,7 +721,10 @@ func (r *NotaryRepository) Update(forWrite bool) (*tufclient.Client, error) {
 	}
 	err = c.Update()
 	if err != nil {
-		if notFound, ok := err.(store.ErrMetaNotFound); ok && notFound.Resource == data.CanonicalRootRole {
+		// notFound.Resource may include a checksum so when the role is root,
+		// it will be root.json or root.<checksum>.json. Therefore best we can
+		// do it match a "root." prefix
+		if notFound, ok := err.(store.ErrMetaNotFound); ok && strings.HasPrefix(notFound.Resource, data.CanonicalRootRole+".") {
 			return nil, r.errRepositoryNotExist()
 		}
 		return nil, err
@@ -876,7 +746,7 @@ func (r *NotaryRepository) bootstrapClient(checkInitialized bool) (*tufclient.Cl
 	// try to read root from cache first. We will trust this root
 	// until we detect a problem during update which will cause
 	// us to download a new root and perform a rotation.
-	rootJSON, cachedRootErr := r.fileStore.GetMeta("root", maxSize)
+	rootJSON, cachedRootErr := r.fileStore.GetMeta("root", -1)
 
 	if cachedRootErr == nil {
 		signedRoot, cachedRootErr = r.validateRoot(rootJSON)
@@ -890,7 +760,8 @@ func (r *NotaryRepository) bootstrapClient(checkInitialized bool) (*tufclient.Cl
 		// checking for initialization of the repo).
 
 		// if remote store successfully set up, try and get root from remote
-		tmpJSON, err := remote.GetMeta("root", maxSize)
+		// We don't have any local data to determine the size of root, so try the maximum (though it is restricted at 100MB)
+		tmpJSON, err := remote.GetMeta("root", -1)
 		if err != nil {
 			// we didn't have a root in cache and were unable to load one from
 			// the server. Nothing we can do but error.
