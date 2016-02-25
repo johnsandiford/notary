@@ -13,9 +13,9 @@ import (
 
 	"github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/data"
-	"github.com/docker/notary/tuf/keys"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -384,8 +384,7 @@ func TestSwizzlerChangeRootKey(t *testing.T) {
 
 	f.ChangeRootKey()
 
-	kdb := keys.NewDB()
-	tufRepo := tuf.NewRepo(kdb, f.CryptoService)
+	tufRepo := tuf.NewRepo(f.CryptoService)
 
 	// we want to test these in a specific order
 	roles := []string{data.CanonicalRootRole, data.CanonicalTargetsRole, data.CanonicalSnapshotRole,
@@ -406,12 +405,14 @@ func TestSwizzlerChangeRootKey(t *testing.T) {
 
 			require.NotEqual(t, len(origRoot.Signed.Keys), len(newRoot.Signed.Keys))
 
+			var rootRole data.Role
 			for r, origRole := range origRoot.Signed.Roles {
 				newRole := newRoot.Signed.Roles[r]
 				require.Len(t, origRole.KeyIDs, 1)
 				require.Len(t, newRole.KeyIDs, 1)
 				if r == data.CanonicalRootRole {
 					require.NotEqual(t, origRole.KeyIDs[0], newRole.KeyIDs[0])
+					rootRole = data.Role{RootRole: *newRole, Name: data.CanonicalRootRole}
 				} else {
 					require.Equal(t, origRole.KeyIDs[0], newRole.KeyIDs[0])
 				}
@@ -420,7 +421,9 @@ func TestSwizzlerChangeRootKey(t *testing.T) {
 			require.NoError(t, tufRepo.SetRoot(newRoot))
 			signedThing, err := newRoot.ToSigned()
 			require.NoError(t, err)
-			require.NoError(t, signed.Verify(signedThing, data.CanonicalRootRole, 1, kdb))
+			newKey := newRoot.Signed.Keys[rootRole.KeyIDs[0]]
+			require.NoError(t, signed.Verify(signedThing,
+				data.BaseRole{Name: data.CanonicalRootRole, Keys: map[string]data.PublicKey{newKey.ID(): newKey}, Threshold: 1}, 1))
 		default:
 			require.True(t, bytes.Equal(origMeta, newMeta), "bytes have changed for role %s", role)
 		}
@@ -574,4 +577,96 @@ func TestMissingSigningKey(t *testing.T) {
 	require.IsType(t, ErrNoKeyForRole{}, f.SetThreshold(data.CanonicalSnapshotRole, 2))
 	require.IsType(t, ErrNoKeyForRole{}, f.UpdateSnapshotHashes())
 	require.IsType(t, ErrNoKeyForRole{}, f.UpdateTimestampHash())
+}
+
+// This mutates the root
+func TestSwizzlerMutateRoot(t *testing.T) {
+	f, origMeta := createNewSwizzler(t)
+
+	assert.NoError(t, f.MutateRoot(func(r *data.Root) { r.Roles["hello"] = nil }))
+
+	for role, metaBytes := range origMeta {
+		newMeta, err := f.MetadataCache.GetMeta(role, -1)
+		require.NoError(t, err)
+
+		if role != data.CanonicalRootRole {
+			require.True(t, bytes.Equal(metaBytes, newMeta), "bytes have changed for role %s", role)
+		} else {
+			require.False(t, bytes.Equal(metaBytes, newMeta))
+			origSigned, newSigned := &data.SignedRoot{}, &data.SignedRoot{}
+			require.NoError(t, json.Unmarshal(metaBytes, origSigned))
+			require.NoError(t, json.Unmarshal(newMeta, newSigned))
+			require.Len(t, origSigned.Signed.Roles, 4)
+			require.Len(t, newSigned.Signed.Roles, 5)
+		}
+	}
+}
+
+// This mutates the timestamp
+func TestSwizzlerMutateTimestamp(t *testing.T) {
+	f, origMeta := createNewSwizzler(t)
+
+	assert.NoError(t, f.MutateTimestamp(func(t *data.Timestamp) { t.Meta["hello"] = data.FileMeta{} }))
+
+	for role, metaBytes := range origMeta {
+		newMeta, err := f.MetadataCache.GetMeta(role, -1)
+		require.NoError(t, err)
+
+		if role != data.CanonicalTimestampRole {
+			require.True(t, bytes.Equal(metaBytes, newMeta), "bytes have changed for role %s", role)
+		} else {
+			require.False(t, bytes.Equal(metaBytes, newMeta))
+			origSigned, newSigned := &data.SignedTimestamp{}, &data.SignedTimestamp{}
+			require.NoError(t, json.Unmarshal(metaBytes, origSigned))
+			require.NoError(t, json.Unmarshal(newMeta, newSigned))
+			require.Len(t, origSigned.Signed.Meta, 1)
+			require.Len(t, newSigned.Signed.Meta, 2)
+		}
+	}
+}
+
+// This mutates the snapshot
+func TestSwizzlerMutateSnapshot(t *testing.T) {
+	f, origMeta := createNewSwizzler(t)
+
+	assert.NoError(t, f.MutateSnapshot(func(s *data.Snapshot) { s.Meta["hello"] = data.FileMeta{} }))
+
+	for role, metaBytes := range origMeta {
+		newMeta, err := f.MetadataCache.GetMeta(role, -1)
+		require.NoError(t, err)
+
+		if role != data.CanonicalSnapshotRole {
+			require.True(t, bytes.Equal(metaBytes, newMeta), "bytes have changed for role %s", role)
+		} else {
+			require.False(t, bytes.Equal(metaBytes, newMeta))
+			origSigned, newSigned := &data.SignedSnapshot{}, &data.SignedSnapshot{}
+			require.NoError(t, json.Unmarshal(metaBytes, origSigned))
+			require.NoError(t, json.Unmarshal(newMeta, newSigned))
+			require.Len(t, origSigned.Signed.Meta, 4)
+			require.Len(t, newSigned.Signed.Meta, 5)
+		}
+	}
+}
+
+// This mutates the targets
+func TestSwizzlerMutateTargets(t *testing.T) {
+	f, origMeta := createNewSwizzler(t)
+
+	assert.NoError(t, f.MutateTargets(func(t *data.Targets) { t.Targets["hello"] = data.FileMeta{} }))
+
+	for role, metaBytes := range origMeta {
+		newMeta, err := f.MetadataCache.GetMeta(role, -1)
+		require.NoError(t, err)
+
+		if role != data.CanonicalTargetsRole {
+			require.True(t, bytes.Equal(metaBytes, newMeta), "bytes have changed for role %s", role)
+		} else {
+			require.False(t, bytes.Equal(metaBytes, newMeta))
+			origSigned, newSigned := &data.SignedTargets{}, &data.SignedTargets{}
+			require.NoError(t, json.Unmarshal(metaBytes, origSigned))
+			require.NoError(t, json.Unmarshal(newMeta, newSigned))
+			require.Len(t, origSigned.Signed.Targets, 0)
+			require.Len(t, newSigned.Signed.Targets, 1)
+		}
+	}
 }

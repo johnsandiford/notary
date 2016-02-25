@@ -172,6 +172,10 @@
 			"Rev": "d0c3fe89de86839aecf2e0579c40ba3bb336a453"
 		},
 		{
+			"ImportPath": "github.com/miekg/pkcs11",
+			"Rev": "df8ae6ca730422dba20c768ff38ef7d79077a59f"
+		},
+		{
 			"ImportPath": "github.com/mitchellh/go-homedir",
 			"Rev": "df55a15e5ce646808815381b3db47a8c66ea62f4"
 		},
@@ -224,7 +228,7 @@
 		},
 		{
 			"ImportPath": "github.com/spf13/cobra",
-			"Rev": "2e6a42892123dda608922f8af8ce85c3bff19575"
+			"Rev": "8e91712f174ced10270cf66615e0a9127e7c4de5"
 		},
 		{
 			"ImportPath": "github.com/spf13/jwalterweatherman",

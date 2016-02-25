@@ -195,7 +195,7 @@ func TestValidateRoot(t *testing.T) {
 	}
 
 	//
-	// This call to ValidateRoot will suceed in getting to the TUF validation, since
+	// This call to ValidateRoot will succeed in getting to the TUF validation, since
 	// we are using a valid PEM encoded certificate chain of intermediate + leaf cert
 	// that are signed by a trusted root authority and the leaf cert has a correct CN.
 	// It will, however, fail to validate, because it has an invalid TUF signature
@@ -280,12 +280,16 @@ func testValidateSuccessfulRootRotation(t *testing.T, keyAlg, rootKeyType string
 	origRootKey := data.NewPublicKey(rootKeyType, origRootPEMCert)
 	replRootKey := data.NewPublicKey(rootKeyType, replRootPEMCert)
 
-	rootRole, err := data.NewRole("root", 1, []string{replRootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole(data.CanonicalRootRole, 1, []string{replRootKey.ID()}, nil)
 	assert.NoError(t, err)
 
 	testRoot, err := data.NewRoot(
 		map[string]data.PublicKey{replRootKey.ID(): replRootKey},
-		map[string]*data.RootRole{"root": &rootRole.RootRole},
+		map[string]*data.RootRole{
+			data.CanonicalRootRole:      &rootRole.RootRole,
+			data.CanonicalTimestampRole: &rootRole.RootRole,
+			data.CanonicalTargetsRole:   &rootRole.RootRole,
+			data.CanonicalSnapshotRole:  &rootRole.RootRole},
 		false,
 	)
 	assert.NoError(t, err, "Failed to create new root")
@@ -338,12 +342,12 @@ func testValidateRootRotationMissingOrigSig(t *testing.T, keyAlg, rootKeyType st
 	// Tuf key with PEM-encoded x509 certificate
 	replRootKey := data.NewPublicKey(rootKeyType, replRootPEMCert)
 
-	rootRole, err := data.NewRole("root", 1, []string{replRootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole(data.CanonicalRootRole, 1, []string{replRootKey.ID()}, nil)
 	assert.NoError(t, err)
 
 	testRoot, err := data.NewRoot(
 		map[string]data.PublicKey{replRootKey.ID(): replRootKey},
-		map[string]*data.RootRole{"root": &rootRole.RootRole},
+		map[string]*data.RootRole{data.CanonicalRootRole: &rootRole.RootRole},
 		false,
 	)
 	assert.NoError(t, err, "Failed to create new root")
@@ -397,12 +401,12 @@ func testValidateRootRotationMissingNewSig(t *testing.T, keyAlg, rootKeyType str
 	origRootKey := data.NewPublicKey(rootKeyType, origRootPEMCert)
 	replRootKey := data.NewPublicKey(rootKeyType, replRootPEMCert)
 
-	rootRole, err := data.NewRole("root", 1, []string{replRootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole(data.CanonicalRootRole, 1, []string{replRootKey.ID()}, nil)
 	assert.NoError(t, err)
 
 	testRoot, err := data.NewRoot(
 		map[string]data.PublicKey{replRootKey.ID(): replRootKey},
-		map[string]*data.RootRole{"root": &rootRole.RootRole},
+		map[string]*data.RootRole{data.CanonicalRootRole: &rootRole.RootRole},
 		false,
 	)
 	assert.NoError(t, err, "Failed to create new root")

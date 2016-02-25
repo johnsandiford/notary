@@ -14,7 +14,6 @@ import (
 	"github.com/docker/notary/server/storage"
 	"github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/data"
-	"github.com/docker/notary/tuf/keys"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/utils"
 	"github.com/docker/notary/tuf/validation"
@@ -27,8 +26,7 @@ import (
 // created and added if snapshotting has been delegated to the
 // server
 func validateUpdate(cs signed.CryptoService, gun string, updates []storage.MetaUpdate, store storage.MetaStore) ([]storage.MetaUpdate, error) {
-	kdb := keys.NewDB()
-	repo := tuf.NewRepo(kdb, cs)
+	repo := tuf.NewRepo(cs)
 	rootRole := data.CanonicalRootRole
 	snapshotRole := data.CanonicalSnapshotRole
 
@@ -79,7 +77,7 @@ func validateUpdate(cs signed.CryptoService, gun string, updates []storage.MetaU
 		}
 	}
 
-	targetsToUpdate, err := loadAndValidateTargets(gun, repo, roles, kdb, store)
+	targetsToUpdate, err := loadAndValidateTargets(gun, repo, roles, store)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +105,7 @@ func validateUpdate(cs signed.CryptoService, gun string, updates []storage.MetaU
 			}
 		}
 
-		if err := validateSnapshot(snapshotRole, oldSnap, roles[snapshotRole], roles, kdb); err != nil {
+		if err := validateSnapshot(snapshotRole, oldSnap, roles[snapshotRole], roles, repo); err != nil {
 			logrus.Error("ErrBadSnapshot: ", err.Error())
 			return nil, validation.ErrBadSnapshot{Msg: err.Error()}
 		}
@@ -120,7 +118,7 @@ func validateUpdate(cs signed.CryptoService, gun string, updates []storage.MetaU
 		// Then:
 		//   - generate a new snapshot
 		//   - add it to the updates
-		update, err := generateSnapshot(gun, kdb, repo, store)
+		update, err := generateSnapshot(gun, repo, store)
 		if err != nil {
 			return nil, err
 		}
@@ -129,7 +127,7 @@ func validateUpdate(cs signed.CryptoService, gun string, updates []storage.MetaU
 	return updatesToApply, nil
 }
 
-func loadAndValidateTargets(gun string, repo *tuf.Repo, roles map[string]storage.MetaUpdate, kdb *keys.KeyDB, store storage.MetaStore) ([]storage.MetaUpdate, error) {
+func loadAndValidateTargets(gun string, repo *tuf.Repo, roles map[string]storage.MetaUpdate, store storage.MetaStore) ([]storage.MetaUpdate, error) {
 	targetsRoles := make(utils.RoleList, 0)
 	for role := range roles {
 		if role == data.CanonicalTargetsRole || data.IsDelegation(role) {
@@ -145,23 +143,24 @@ func loadAndValidateTargets(gun string, repo *tuf.Repo, roles map[string]storage
 
 	updatesToApply := make([]storage.MetaUpdate, 0, len(targetsRoles))
 	for _, role := range targetsRoles {
-		parentRole := path.Dir(role)
-
-		// don't load parent if current role is "targets" or if the parent has
-		// already been loaded
-		_, ok := repo.Targets[parentRole]
-		if role != data.CanonicalTargetsRole && !ok {
-			err := loadTargetsFromStore(gun, parentRole, repo, store)
-			if err != nil {
-				return nil, err
+		// don't load parent if current role is "targets",
+		// we must load all ancestor roles for delegations to validate the full parent chain
+		ancestorRole := role
+		for ancestorRole != data.CanonicalTargetsRole {
+			ancestorRole = path.Dir(ancestorRole)
+			if _, ok := repo.Targets[ancestorRole]; !ok {
+				err := loadTargetsFromStore(gun, ancestorRole, repo, store)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 		var (
 			t   *data.SignedTargets
 			err error
 		)
-		if t, err = validateTargets(role, roles, kdb); err != nil {
-			if err == signed.ErrUnknownRole {
+		if t, err = validateTargets(role, roles, repo); err != nil {
+			if _, ok := err.(data.ErrInvalidRole); ok {
 				// role wasn't found in its parent. It has been removed
 				// or never existed. Drop this role from the update
 				// (by not adding it to updatesToApply)
@@ -193,9 +192,9 @@ func loadTargetsFromStore(gun, role string, repo *tuf.Repo, store storage.MetaSt
 	return repo.SetTargets(role, t)
 }
 
-func generateSnapshot(gun string, kdb *keys.KeyDB, repo *tuf.Repo, store storage.MetaStore) (*storage.MetaUpdate, error) {
-	role := kdb.GetRole(data.CanonicalSnapshotRole)
-	if role == nil {
+func generateSnapshot(gun string, repo *tuf.Repo, store storage.MetaStore) (*storage.MetaUpdate, error) {
+	role, err := repo.GetBaseRole(data.CanonicalSnapshotRole)
+	if err != nil {
 		return nil, validation.ErrBadRoot{Msg: "root did not include snapshot role"}
 	}
 
@@ -206,7 +205,7 @@ func generateSnapshot(gun string, kdb *keys.KeyDB, repo *tuf.Repo, store storage
 	foundK := data.NewPublicKey(algo, keyBytes)
 
 	validKey := false
-	for _, id := range role.KeyIDs {
+	for _, id := range role.ListKeyIDs() {
 		if id == foundK.ID() {
 			validKey = true
 			break
@@ -257,7 +256,7 @@ func generateSnapshot(gun string, kdb *keys.KeyDB, repo *tuf.Repo, store storage
 	}, nil
 }
 
-func validateSnapshot(role string, oldSnap *data.SignedSnapshot, snapUpdate storage.MetaUpdate, roles map[string]storage.MetaUpdate, kdb *keys.KeyDB) error {
+func validateSnapshot(role string, oldSnap *data.SignedSnapshot, snapUpdate storage.MetaUpdate, roles map[string]storage.MetaUpdate, repo *tuf.Repo) error {
 	s := &data.Signed{}
 	err := json.Unmarshal(snapUpdate.Data, s)
 	if err != nil {
@@ -265,7 +264,11 @@ func validateSnapshot(role string, oldSnap *data.SignedSnapshot, snapUpdate stor
 	}
 	// version specifically gets validated when writing to store to
 	// better handle race conditions there.
-	if err := signed.Verify(s, role, 0, kdb); err != nil {
+	snapshotRole, err := repo.GetBaseRole(role)
+	if err != nil {
+		return err
+	}
+	if err := signed.Verify(s, snapshotRole, 0); err != nil {
 		return err
 	}
 
@@ -315,7 +318,7 @@ func checkHashes(meta data.FileMeta, update []byte) bool {
 	return true
 }
 
-func validateTargets(role string, roles map[string]storage.MetaUpdate, kdb *keys.KeyDB) (*data.SignedTargets, error) {
+func validateTargets(role string, roles map[string]storage.MetaUpdate, repo *tuf.Repo) (*data.SignedTargets, error) {
 	// TODO: when delegations are being validated, validate parent
 	//       role exists for any delegation
 	s := &data.Signed{}
@@ -325,10 +328,25 @@ func validateTargets(role string, roles map[string]storage.MetaUpdate, kdb *keys
 	}
 	// version specifically gets validated when writing to store to
 	// better handle race conditions there.
-	if err := signed.Verify(s, role, 0, kdb); err != nil {
+	var targetOrDelgRole data.BaseRole
+	if role == data.CanonicalTargetsRole {
+		targetOrDelgRole, err = repo.GetBaseRole(role)
+		if err != nil {
+			logrus.Debugf("no %s role loaded", role)
+			return nil, err
+		}
+	} else {
+		delgRole, err := repo.GetDelegationRole(role)
+		if err != nil {
+			logrus.Debugf("no %s delegation role loaded", role)
+			return nil, err
+		}
+		targetOrDelgRole = delgRole.BaseRole
+	}
+	if err := signed.Verify(s, targetOrDelgRole, 0); err != nil {
 		return nil, err
 	}
-	t, err := data.TargetsFromSigned(s)
+	t, err := data.TargetsFromSigned(s, role)
 	if err != nil {
 		return nil, err
 	}

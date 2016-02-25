@@ -14,39 +14,45 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/notary/tuf/data"
-	"github.com/docker/notary/tuf/keys"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/store"
 )
 
 func TestRotation(t *testing.T) {
-	kdb := keys.NewDB()
 	signer := signed.NewEd25519()
-	repo := tuf.NewRepo(kdb, signer)
+	repo := tuf.NewRepo(signer)
 	remote := store.NewMemoryStore(nil)
 	cache := store.NewMemoryStore(nil)
 
 	// Generate initial root key and role and add to key DB
 	rootKey, err := signer.Create("root", data.ED25519Key)
 	assert.NoError(t, err, "Error creating root key")
-	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil)
 	assert.NoError(t, err, "Error creating root role")
 
-	kdb.AddKey(rootKey)
-	err = kdb.AddRole(rootRole)
-	assert.NoError(t, err, "Error adding root role to db")
+	originalRoot, err := data.NewRoot(
+		map[string]data.PublicKey{rootKey.ID(): rootKey},
+		map[string]*data.RootRole{"root": &rootRole.RootRole},
+		false,
+	)
 
-	// Generate new key and role. These will appear in the root.json
-	// but will not be added to the keyDB.
+	repo.Root = originalRoot
+
+	// Generate new key and role.
 	replacementKey, err := signer.Create("root", data.ED25519Key)
 	assert.NoError(t, err, "Error creating replacement root key")
-	replacementRole, err := data.NewRole("root", 1, []string{replacementKey.ID()}, nil, nil)
+	replacementRole, err := data.NewRole("root", 1, []string{replacementKey.ID()}, nil)
 	assert.NoError(t, err, "Error creating replacement root role")
 
 	// Generate a new root with the replacement key and role
 	testRoot, err := data.NewRoot(
 		map[string]data.PublicKey{replacementKey.ID(): replacementKey},
-		map[string]*data.RootRole{"root": &replacementRole.RootRole},
+		map[string]*data.RootRole{
+			data.CanonicalRootRole:      &replacementRole.RootRole,
+			data.CanonicalSnapshotRole:  &replacementRole.RootRole,
+			data.CanonicalTargetsRole:   &replacementRole.RootRole,
+			data.CanonicalTimestampRole: &replacementRole.RootRole,
+		},
 		false,
 	)
 	assert.NoError(t, err, "Failed to create new root")
@@ -67,7 +73,7 @@ func TestRotation(t *testing.T) {
 	assert.True(t, origKeySig, "Original root key signature not present")
 	assert.True(t, replKeySig, "Replacement root key signature not present")
 
-	client := NewClient(repo, remote, kdb, cache)
+	client := NewClient(repo, remote, cache)
 
 	err = client.verifyRoot("root", signedRoot, 0)
 	assert.NoError(t, err, "Failed to verify key rotated root")
@@ -75,27 +81,29 @@ func TestRotation(t *testing.T) {
 
 func TestRotationNewSigMissing(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
-	kdb := keys.NewDB()
 	signer := signed.NewEd25519()
-	repo := tuf.NewRepo(kdb, signer)
+	repo := tuf.NewRepo(signer)
 	remote := store.NewMemoryStore(nil)
 	cache := store.NewMemoryStore(nil)
 
 	// Generate initial root key and role and add to key DB
 	rootKey, err := signer.Create("root", data.ED25519Key)
 	assert.NoError(t, err, "Error creating root key")
-	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil)
 	assert.NoError(t, err, "Error creating root role")
 
-	kdb.AddKey(rootKey)
-	err = kdb.AddRole(rootRole)
-	assert.NoError(t, err, "Error adding root role to db")
+	originalRoot, err := data.NewRoot(
+		map[string]data.PublicKey{rootKey.ID(): rootKey},
+		map[string]*data.RootRole{"root": &rootRole.RootRole},
+		false,
+	)
 
-	// Generate new key and role. These will appear in the root.json
-	// but will not be added to the keyDB.
+	repo.Root = originalRoot
+
+	// Generate new key and role.
 	replacementKey, err := signer.Create("root", data.ED25519Key)
 	assert.NoError(t, err, "Error creating replacement root key")
-	replacementRole, err := data.NewRole("root", 1, []string{replacementKey.ID()}, nil, nil)
+	replacementRole, err := data.NewRole("root", 1, []string{replacementKey.ID()}, nil)
 	assert.NoError(t, err, "Error creating replacement root role")
 
 	assert.NotEqual(t, rootKey.ID(), replacementKey.ID(), "Key IDs are the same")
@@ -127,7 +135,7 @@ func TestRotationNewSigMissing(t *testing.T) {
 	assert.True(t, origKeySig, "Original root key signature not present")
 	assert.False(t, replKeySig, "Replacement root key signature was present and shouldn't be")
 
-	client := NewClient(repo, remote, kdb, cache)
+	client := NewClient(repo, remote, cache)
 
 	err = client.verifyRoot("root", signedRoot, 0)
 	assert.Error(t, err, "Should have errored on verify as replacement signature was missing.")
@@ -136,27 +144,29 @@ func TestRotationNewSigMissing(t *testing.T) {
 
 func TestRotationOldSigMissing(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
-	kdb := keys.NewDB()
 	signer := signed.NewEd25519()
-	repo := tuf.NewRepo(kdb, signer)
+	repo := tuf.NewRepo(signer)
 	remote := store.NewMemoryStore(nil)
 	cache := store.NewMemoryStore(nil)
 
 	// Generate initial root key and role and add to key DB
 	rootKey, err := signer.Create("root", data.ED25519Key)
 	assert.NoError(t, err, "Error creating root key")
-	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil)
 	assert.NoError(t, err, "Error creating root role")
 
-	kdb.AddKey(rootKey)
-	err = kdb.AddRole(rootRole)
-	assert.NoError(t, err, "Error adding root role to db")
+	originalRoot, err := data.NewRoot(
+		map[string]data.PublicKey{rootKey.ID(): rootKey},
+		map[string]*data.RootRole{"root": &rootRole.RootRole},
+		false,
+	)
 
-	// Generate new key and role. These will appear in the root.json
-	// but will not be added to the keyDB.
+	repo.Root = originalRoot
+
+	// Generate new key and role.
 	replacementKey, err := signer.Create("root", data.ED25519Key)
 	assert.NoError(t, err, "Error creating replacement root key")
-	replacementRole, err := data.NewRole("root", 1, []string{replacementKey.ID()}, nil, nil)
+	replacementRole, err := data.NewRole("root", 1, []string{replacementKey.ID()}, nil)
 	assert.NoError(t, err, "Error creating replacement root role")
 
 	assert.NotEqual(t, rootKey.ID(), replacementKey.ID(), "Key IDs are the same")
@@ -188,7 +198,7 @@ func TestRotationOldSigMissing(t *testing.T) {
 	assert.False(t, origKeySig, "Original root key signature was present and shouldn't be")
 	assert.True(t, replKeySig, "Replacement root key signature was not present")
 
-	client := NewClient(repo, remote, kdb, cache)
+	client := NewClient(repo, remote, cache)
 
 	err = client.verifyRoot("root", signedRoot, 0)
 	assert.Error(t, err, "Should have errored on verify as replacement signature was missing.")
@@ -196,9 +206,9 @@ func TestRotationOldSigMissing(t *testing.T) {
 }
 
 func TestCheckRootExpired(t *testing.T) {
-	repo := tuf.NewRepo(nil, nil)
+	repo := tuf.NewRepo(nil)
 	storage := store.NewMemoryStore(nil)
-	client := NewClient(repo, storage, nil, storage)
+	client := NewClient(repo, storage, storage)
 
 	root := &data.SignedRoot{}
 	root.Signed.Expires = time.Now().AddDate(-1, 0, 0)
@@ -233,10 +243,10 @@ func TestCheckRootExpired(t *testing.T) {
 }
 
 func TestChecksumMismatch(t *testing.T) {
-	repo := tuf.NewRepo(nil, nil)
+	repo := tuf.NewRepo(nil)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := testutils.NewCorruptingMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, nil, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	sampleTargets := data.NewTargets()
 	orig, err := json.Marshal(sampleTargets)
@@ -250,10 +260,10 @@ func TestChecksumMismatch(t *testing.T) {
 }
 
 func TestChecksumMatch(t *testing.T) {
-	repo := tuf.NewRepo(nil, nil)
+	repo := tuf.NewRepo(nil)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, nil, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	sampleTargets := data.NewTargets()
 	orig, err := json.Marshal(sampleTargets)
@@ -267,10 +277,10 @@ func TestChecksumMatch(t *testing.T) {
 }
 
 func TestSizeMismatchLong(t *testing.T) {
-	repo := tuf.NewRepo(nil, nil)
+	repo := tuf.NewRepo(nil)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := testutils.NewLongMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, nil, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	sampleTargets := data.NewTargets()
 	orig, err := json.Marshal(sampleTargets)
@@ -287,10 +297,10 @@ func TestSizeMismatchLong(t *testing.T) {
 }
 
 func TestSizeMismatchShort(t *testing.T) {
-	repo := tuf.NewRepo(nil, nil)
+	repo := tuf.NewRepo(nil)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := testutils.NewShortMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, nil, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	sampleTargets := data.NewTargets()
 	orig, err := json.Marshal(sampleTargets)
@@ -307,11 +317,11 @@ func TestSizeMismatchShort(t *testing.T) {
 }
 
 func TestDownloadTargetsHappy(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	signedOrig, err := repo.SignTargets("targets", data.DefaultExpires("targets"))
 	assert.NoError(t, err)
@@ -335,11 +345,11 @@ func TestDownloadTargetsLarge(t *testing.T) {
 		t.Skip("skipping test in short mode")
 	}
 
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	hash := sha256.Sum256([]byte{})
 	f := data.FileMeta{
@@ -373,11 +383,11 @@ func TestDownloadTargetsLarge(t *testing.T) {
 }
 
 func TestDownloadTargetsDeepHappy(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	delegations := []string{
 		// left subtree
@@ -398,11 +408,12 @@ func TestDownloadTargetsDeepHappy(t *testing.T) {
 		// create role
 		k, err := cs.Create(r, data.ED25519Key)
 		assert.NoError(t, err)
-		role, err := data.NewRole(r, 1, []string{k.ID()}, []string{""}, nil)
-		assert.NoError(t, err)
 
 		// add role to repo
-		repo.UpdateDelegations(role, []data.PublicKey{k})
+		err = repo.UpdateDelegationKeys(r, []data.PublicKey{k}, []string{}, 1)
+		assert.NoError(t, err)
+		err = repo.UpdateDelegationPaths(r, []string{""}, []string{}, false)
+		assert.NoError(t, err)
 		repo.InitTargets(r)
 	}
 
@@ -448,11 +459,11 @@ func TestDownloadTargetsDeepHappy(t *testing.T) {
 }
 
 func TestDownloadTargetChecksumMismatch(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := testutils.NewCorruptingMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample targets
 	signedOrig, err := repo.SignTargets("targets", data.DefaultExpires("targets"))
@@ -486,11 +497,11 @@ func TestDownloadTargetChecksumMismatch(t *testing.T) {
 // TestDownloadTargetsNoChecksum: it's never valid to download any targets
 // role (incl. delegations) when a checksum is not available.
 func TestDownloadTargetsNoChecksum(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample targets
 	signedOrig, err := repo.SignTargets("targets", data.DefaultExpires("targets"))
@@ -503,17 +514,17 @@ func TestDownloadTargetsNoChecksum(t *testing.T) {
 	delete(repo.Snapshot.Signed.Meta["targets"].Hashes, "sha256")
 
 	err = client.downloadTargets("targets")
-	assert.IsType(t, ErrMissingMeta{}, err)
+	assert.IsType(t, data.ErrMissingMeta{}, err)
 }
 
 // TestDownloadTargetsNoSnapshot: it's never valid to download any targets
 // role (incl. delegations) when a checksum is not available.
 func TestDownloadTargetsNoSnapshot(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample targets
 	signedOrig, err := repo.SignTargets("targets", data.DefaultExpires("targets"))
@@ -526,15 +537,15 @@ func TestDownloadTargetsNoSnapshot(t *testing.T) {
 	repo.Snapshot = nil
 
 	err = client.downloadTargets("targets")
-	assert.IsType(t, ErrMissingMeta{}, err)
+	assert.IsType(t, tuf.ErrNotLoaded{}, err)
 }
 
 func TestBootstrapDownloadRootHappy(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample root
 	signedOrig, err := repo.SignRoot(data.DefaultExpires("root"))
@@ -552,11 +563,11 @@ func TestBootstrapDownloadRootHappy(t *testing.T) {
 }
 
 func TestUpdateDownloadRootHappy(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample root, snapshot, and timestamp
 	signedOrig, err := repo.SignRoot(data.DefaultExpires("root"))
@@ -576,10 +587,10 @@ func TestUpdateDownloadRootHappy(t *testing.T) {
 func TestUpdateDownloadRootBadChecksum(t *testing.T) {
 	remoteStore := testutils.NewCorruptingMemoryStore(nil)
 
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStore, kdb, localStorage)
+	client := NewClient(repo, remoteStore, localStorage)
 
 	// sign and "upload" sample root
 	signedOrig, err := repo.SignRoot(data.DefaultExpires("root"))
@@ -599,10 +610,10 @@ func TestUpdateDownloadRootBadChecksum(t *testing.T) {
 
 func TestUpdateDownloadRootChecksumNotFound(t *testing.T) {
 	remoteStore := store.NewMemoryStore(nil)
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStore, kdb, localStorage)
+	client := NewClient(repo, remoteStore, localStorage)
 
 	// sign snapshot to make sure we have current checksum for root
 	_, err = repo.SignSnapshot(data.DefaultExpires("snapshot"))
@@ -623,11 +634,11 @@ func TestUpdateDownloadRootChecksumNotFound(t *testing.T) {
 }
 
 func TestDownloadTimestampHappy(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample timestamp
 	signedOrig, err := repo.SignTimestamp(data.DefaultExpires("timestamp"))
@@ -642,11 +653,11 @@ func TestDownloadTimestampHappy(t *testing.T) {
 }
 
 func TestDownloadSnapshotHappy(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample snapshot and timestamp
 	signedOrig, err := repo.SignSnapshot(data.DefaultExpires("snapshot"))
@@ -674,11 +685,11 @@ func TestDownloadSnapshotLarge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping test in short mode")
 	}
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// Add a ton of empty delegation roles to targets to make snapshot data huge
 	// This can also be done by adding legitimate delegations but it will be much slower
@@ -713,11 +724,11 @@ func TestDownloadSnapshotLarge(t *testing.T) {
 // TestDownloadSnapshotNoChecksum: It should never be valid to download a
 // snapshot if we don't have a checksum
 func TestDownloadSnapshotNoTimestamp(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample snapshot and timestamp
 	signedOrig, err := repo.SignSnapshot(data.DefaultExpires("snapshot"))
@@ -730,15 +741,15 @@ func TestDownloadSnapshotNoTimestamp(t *testing.T) {
 	repo.Timestamp = nil
 
 	err = client.downloadSnapshot()
-	assert.IsType(t, ErrMissingMeta{}, err)
+	assert.IsType(t, tuf.ErrNotLoaded{}, err)
 }
 
 func TestDownloadSnapshotNoChecksum(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// create and "upload" sample snapshot and timestamp
 	signedOrig, err := repo.SignSnapshot(data.DefaultExpires("snapshot"))
@@ -751,15 +762,15 @@ func TestDownloadSnapshotNoChecksum(t *testing.T) {
 	delete(repo.Timestamp.Signed.Meta["snapshot"].Hashes, "sha256")
 
 	err = client.downloadSnapshot()
-	assert.IsType(t, ErrMissingMeta{}, err)
+	assert.IsType(t, data.ErrMissingMeta{}, err)
 }
 
 func TestDownloadSnapshotChecksumNotFound(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	// sign timestamp to ensure it has a checksum for snapshot
 	_, err = repo.SignTimestamp(data.DefaultExpires("timestamp"))
@@ -779,70 +790,14 @@ func TestDownloadSnapshotChecksumNotFound(t *testing.T) {
 	assert.IsType(t, store.ErrMetaNotFound{}, err)
 }
 
-// TargetMeta returns the file metadata for a file path in the role subtree,
-// if it exists. It also returns the role in that subtree in which the target
-// was found. If the path doesn't exist in that role subtree, returns
-// nil and an empty string.
-func TestTargetMeta(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
-	assert.NoError(t, err)
-	localStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, nil, kdb, localStorage)
-
-	delegations := []string{
-		"targets/level1",
-		"targets/level1/a",
-		"targets/level1/a/i",
-	}
-
-	k, err := cs.Create("", data.ED25519Key)
-	assert.NoError(t, err)
-
-	hash := sha256.Sum256([]byte{})
-	f := data.FileMeta{
-		Length: 1,
-		Hashes: map[string][]byte{
-			"sha256": hash[:],
-		},
-	}
-
-	for i, r := range delegations {
-		// create role
-		role, err := data.NewRole(r, 1, []string{k.ID()}, []string{""}, nil)
-		assert.NoError(t, err)
-
-		// add role to repo
-		repo.UpdateDelegations(role, []data.PublicKey{k})
-		repo.InitTargets(r)
-
-		// add a target to the role
-		_, err = repo.AddTargets(r, data.Files{strconv.Itoa(i): f})
-		assert.NoError(t, err)
-	}
-
-	// returns the right level
-	fileMeta, role := client.TargetMeta("targets", "1")
-	assert.Equal(t, &f, fileMeta)
-	assert.Equal(t, "targets/level1/a", role)
-
-	// looks only in subtree
-	fileMeta, role = client.TargetMeta("targets/level1/a", "0")
-	assert.Nil(t, fileMeta)
-	assert.Equal(t, "", role)
-
-	fileMeta, role = client.TargetMeta("targets/level1/a", "2")
-	assert.Equal(t, &f, fileMeta)
-	assert.Equal(t, "targets/level1/a/i", role)
-}
-
 // If there is no local cache and also no remote timestamp, downloading the timestamp
 // fails with a store.ErrMetaNotFound
 func TestDownloadTimestampNoTimestamps(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	err = client.downloadTimestamp()
 	assert.Error(t, err)
@@ -854,11 +809,11 @@ func TestDownloadTimestampNoTimestamps(t *testing.T) {
 // If there is no local cache and the remote timestamp is empty, downloading the timestamp
 // fails with a store.ErrMetaNotFound
 func TestDownloadTimestampNoLocalTimestampRemoteTimestampEmpty(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 	remoteStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: {}})
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	err = client.downloadTimestamp()
 	assert.Error(t, err)
@@ -868,7 +823,7 @@ func TestDownloadTimestampNoLocalTimestampRemoteTimestampEmpty(t *testing.T) {
 // If there is no local cache and the remote timestamp is invalid, downloading the timestamp
 // fails with a store.ErrMetaNotFound
 func TestDownloadTimestampNoLocalTimestampRemoteTimestampInvalid(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	localStorage := store.NewMemoryStore(nil)
 
@@ -880,7 +835,7 @@ func TestDownloadTimestampNoLocalTimestampRemoteTimestampInvalid(t *testing.T) {
 	assert.NoError(t, err)
 	remoteStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
 
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 	err = client.downloadTimestamp()
 	assert.Error(t, err)
 	assert.IsType(t, signed.ErrRoleThreshold{}, err)
@@ -888,7 +843,7 @@ func TestDownloadTimestampNoLocalTimestampRemoteTimestampInvalid(t *testing.T) {
 
 // If there is is a local cache and no remote timestamp, we fall back on the cached timestamp
 func TestDownloadTimestampLocalTimestampNoRemoteTimestamp(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 
 	// add a timestamp to the local cache
@@ -899,7 +854,7 @@ func TestDownloadTimestampLocalTimestampNoRemoteTimestamp(t *testing.T) {
 	localStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
 
 	remoteStorage := store.NewMemoryStore(nil)
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 
 	err = client.downloadTimestamp()
 	assert.NoError(t, err)
@@ -907,7 +862,7 @@ func TestDownloadTimestampLocalTimestampNoRemoteTimestamp(t *testing.T) {
 
 // If there is is a local cache and the remote timestamp is invalid, we fall back on the cached timestamp
 func TestDownloadTimestampLocalTimestampInvalidRemoteTimestamp(t *testing.T) {
-	kdb, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 
 	// add a timestamp to the local cache
@@ -923,7 +878,7 @@ func TestDownloadTimestampLocalTimestampInvalidRemoteTimestamp(t *testing.T) {
 	assert.NoError(t, err)
 	remoteStorage := store.NewMemoryStore(map[string][]byte{data.CanonicalTimestampRole: ts})
 
-	client := NewClient(repo, remoteStorage, kdb, localStorage)
+	client := NewClient(repo, remoteStorage, localStorage)
 	err = client.downloadTimestamp()
 	assert.NoError(t, err)
 }

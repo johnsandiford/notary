@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"io/ioutil"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	ctxu "github.com/docker/distribution/context"
+	"github.com/docker/notary"
 	"github.com/docker/notary/cryptoservice"
 	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/server"
@@ -56,11 +58,8 @@ func runCommand(t *testing.T, tempDir string, args ...string) (string, error) {
 	return string(output), retErr
 }
 
-// makes a testing notary-server
-func setupServer() *httptest.Server {
-	// Set up server
-	ctx := context.WithValue(
-		context.Background(), "metaStore", storage.NewMemStorage())
+func setupServerHandler(metaStore storage.MetaStore) http.Handler {
+	ctx := context.WithValue(context.Background(), "metaStore", metaStore)
 
 	ctx = context.WithValue(ctx, "keyAlgorithm", data.ECDSAKey)
 
@@ -72,7 +71,12 @@ func setupServer() *httptest.Server {
 
 	cryptoService := cryptoservice.NewCryptoService(
 		"", trustmanager.NewKeyMemoryStore(passphrase.ConstantRetriever("pass")))
-	return httptest.NewServer(server.RootHandler(nil, ctx, cryptoService))
+	return server.RootHandler(nil, ctx, cryptoService)
+}
+
+// makes a testing notary-server
+func setupServer() *httptest.Server {
+	return httptest.NewServer(setupServerHandler(storage.NewMemStorage()))
 }
 
 // Initializes a repo, adds a target, publishes the target, lists the target,
@@ -195,10 +199,12 @@ func TestClientDelegationsInteraction(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, output, "No delegations present in this repository.")
 
-	// add new valid delegation with single new cert
+	// add new valid delegation with single new cert, and no path
 	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", tempFile.Name())
 	assert.NoError(t, err)
 	assert.Contains(t, output, "Addition of delegation role")
+	assert.Contains(t, output, keyID)
+	assert.NotContains(t, output, "path")
 
 	// check status - see delegation
 	output, err = runCommand(t, tempDir, "status", "gun")
@@ -219,11 +225,30 @@ func TestClientDelegationsInteraction(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, output, "No unpublished changes for gun")
 
-	// list delegations - we should see our added delegation
+	// list delegations - we should see our added delegation, with no paths
 	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
 	assert.NoError(t, err)
 	assert.Contains(t, output, "targets/delegation")
 	assert.Contains(t, output, keyID)
+	assert.NotContains(t, output, "\"\"")
+
+	// add all paths to this delegation
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", "--all-paths")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "Addition of delegation role")
+	assert.Contains(t, output, "\"\"")
+	assert.Contains(t, output, "<all paths>")
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should see our added delegation, with no paths
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "targets/delegation")
+	assert.Contains(t, output, "\"\"")
+	assert.Contains(t, output, "<all paths>")
 
 	// Setup another certificate
 	tempFile2, err := ioutil.TempFile("", "pemfile2")
@@ -246,10 +271,11 @@ func TestClientDelegationsInteraction(t *testing.T) {
 	keyID2, err := utils.CanonicalKeyID(parsedPubKey2)
 	assert.NoError(t, err)
 
-	// add to the delegation by specifying the same role, this time add another key and path
+	// add to the delegation by specifying the same role, this time add a scoped path
 	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", tempFile2.Name(), "--paths", "path")
 	assert.NoError(t, err)
 	assert.Contains(t, output, "Addition of delegation role")
+	assert.Contains(t, output, keyID2)
 
 	// publish repo
 	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
@@ -296,6 +322,8 @@ func TestClientDelegationsInteraction(t *testing.T) {
 	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", tempFile.Name(), tempFile2.Name(), "--paths", "path1,path2")
 	assert.NoError(t, err)
 	assert.Contains(t, output, "Addition of delegation role")
+	assert.Contains(t, output, keyID)
+	assert.Contains(t, output, keyID2)
 
 	// publish repo
 	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
@@ -361,6 +389,124 @@ func TestClientDelegationsInteraction(t *testing.T) {
 	assert.NotContains(t, output, "path3")
 	assert.Contains(t, output, keyID)
 	assert.Contains(t, output, keyID2)
+
+	// Add a bunch of individual paths so we can test a delegation remove --all-paths
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", "--paths", "abcdef,123456")
+	assert.NoError(t, err)
+
+	// Add more individual paths so we can test a delegation remove --all-paths
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", "--paths", "banana/split,apple/crumble/pie,orange.peel,kiwi")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should see all of our paths
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "abcdef")
+	assert.Contains(t, output, "123456")
+	assert.Contains(t, output, "banana/split")
+	assert.Contains(t, output, "apple/crumble/pie")
+	assert.Contains(t, output, "orange.peel")
+	assert.Contains(t, output, "kiwi")
+
+	// Try adding "", and check that adding it with other paths clears out the others
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", "--paths", "\"\",grapefruit,pomegranate")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should see all of our old paths, and ""
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "abcdef")
+	assert.Contains(t, output, "123456")
+	assert.Contains(t, output, "banana/split")
+	assert.Contains(t, output, "apple/crumble/pie")
+	assert.Contains(t, output, "orange.peel")
+	assert.Contains(t, output, "kiwi")
+	assert.Contains(t, output, "\"\"")
+	assert.NotContains(t, output, "grapefruit")
+	assert.NotContains(t, output, "pomegranate")
+
+	// Try removing just ""
+	output, err = runCommand(t, tempDir, "delegation", "remove", "gun", "targets/delegation", "--paths", "\"\"")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should see all of our old paths without ""
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "abcdef")
+	assert.Contains(t, output, "123456")
+	assert.Contains(t, output, "banana/split")
+	assert.Contains(t, output, "apple/crumble/pie")
+	assert.Contains(t, output, "orange.peel")
+	assert.Contains(t, output, "kiwi")
+	assert.NotContains(t, output, "\"\"")
+
+	// Remove --all-paths to clear out all paths from this delegation
+	output, err = runCommand(t, tempDir, "delegation", "remove", "gun", "targets/delegation", "--all-paths")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should see all of our paths
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.NotContains(t, output, "abcdef")
+	assert.NotContains(t, output, "123456")
+	assert.NotContains(t, output, "banana/split")
+	assert.NotContains(t, output, "apple/crumble/pie")
+	assert.NotContains(t, output, "orange.peel")
+	assert.NotContains(t, output, "kiwi")
+
+	// Check that we ignore other --paths if we pass in --all-paths on an add
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", "--all-paths", "--paths", "grapefruit,pomegranate")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should only see "", and not the other paths specified
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "\"\"")
+	assert.NotContains(t, output, "grapefruit")
+	assert.NotContains(t, output, "pomegranate")
+
+	// Add those extra paths we ignored to set up the next test
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", "--paths", "grapefruit,pomegranate")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// Check that we ignore other --paths if we pass in --all-paths on a remove
+	output, err = runCommand(t, tempDir, "delegation", "remove", "gun", "targets/delegation", "--all-paths", "--paths", "pomegranate")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list delegations - we should see no paths
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	assert.NoError(t, err)
+	assert.NotContains(t, output, "\"\"")
+	assert.NotContains(t, output, "grapefruit")
+	assert.NotContains(t, output, "pomegranate")
 
 	// remove by force to delete the delegation entirely
 	output, err = runCommand(t, tempDir, "delegation", "remove", "gun", "targets/delegation", "-y")
@@ -458,6 +604,7 @@ func TestClientDelegationsPublishing(t *testing.T) {
 	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/releases", tempFile.Name(), "--paths", "\"\"")
 	assert.NoError(t, err)
 	assert.Contains(t, output, "Addition of delegation role")
+	assert.Contains(t, output, canonicalKeyID)
 
 	// publish repo
 	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
@@ -514,6 +661,47 @@ func TestClientDelegationsPublishing(t *testing.T) {
 	// First remove the old key and add the new style
 	assert.NoError(t, os.Remove(filepath.Join(keyDir, canonicalKeyID+"_releases.key")))
 	err = ioutil.WriteFile(filepath.Join(keyDir, canonicalKeyID+".key"), privKeyBytesWithRole, 0700)
+	assert.NoError(t, err)
+
+	// add a target using the delegation -- will only add to targets/releases
+	_, err = runCommand(t, tempDir, "add", "gun", target, tempTargetFile.Name(), "--roles", "targets/releases")
+	assert.NoError(t, err)
+
+	// list targets for targets/releases - we should see no targets until we publish
+	output, err = runCommand(t, tempDir, "-s", server.URL, "list", "gun", "--roles", "targets/releases")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "No targets")
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// list targets for targets/releases - we should see our target!
+	output, err = runCommand(t, tempDir, "-s", server.URL, "list", "gun", "--roles", "targets/releases")
+	assert.NoError(t, err)
+	assert.Contains(t, output, "targets/releases")
+
+	// remove the target for this role only
+	_, err = runCommand(t, tempDir, "remove", "gun", target, "--roles", "targets/releases")
+	assert.NoError(t, err)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	assert.NoError(t, err)
+
+	// Now remove this key, and make a new file to import the delegation's key from
+	assert.NoError(t, os.Remove(filepath.Join(keyDir, canonicalKeyID+".key")))
+	tempPrivFile, err := ioutil.TempFile("/tmp", "privfile")
+	assert.NoError(t, err)
+	defer os.Remove(tempPrivFile.Name())
+
+	// Write the private key to a file so we can import it
+	_, err = tempPrivFile.Write(privKeyBytesNoRole)
+	assert.NoError(t, err)
+	tempPrivFile.Close()
+
+	// Import the private key, associating it with our delegation role
+	_, err = runCommand(t, tempDir, "key", "import", tempPrivFile.Name(), "--role", "targets/releases")
 	assert.NoError(t, err)
 
 	// add a target using the delegation -- will only add to targets/releases
@@ -887,6 +1075,108 @@ func TestClientKeyImportExportRootOnly(t *testing.T) {
 		t, tempDir, server.URL, "gun", target, tempFile.Name())
 }
 
+// Helper method to get the subdirectory for TUF keys
+func getKeySubdir(role, gun string) string {
+	subdir := notary.PrivDir
+	switch role {
+	case data.CanonicalRootRole:
+		return filepath.Join(subdir, notary.RootKeysSubdir)
+	case data.CanonicalTargetsRole:
+		return filepath.Join(subdir, notary.NonRootKeysSubdir, gun)
+	case data.CanonicalSnapshotRole:
+		return filepath.Join(subdir, notary.NonRootKeysSubdir, gun)
+	default:
+		return filepath.Join(subdir, notary.NonRootKeysSubdir)
+	}
+}
+
+// Tests importing and exporting keys for all different roles and GUNs
+func TestClientKeyImportExportAllRoles(t *testing.T) {
+	if rootOnHardware() {
+		t.Log("Cannot import or export a non-root key from hardware. Will skip test.")
+		return
+	}
+	// -- setup --
+	setUp(t)
+
+	tempDir := tempDirWithConfig(t, "{}")
+	defer os.RemoveAll(tempDir)
+
+	server := setupServer()
+	defer server.Close()
+
+	// -- tests --
+	_, err := runCommand(t, tempDir, "-s", server.URL, "init", "gun")
+	assert.NoError(t, err)
+
+	testRoles := append(data.BaseRoles, "targets/releases")
+	// Test importing and exporting keys to all base roles and delegation role
+	for _, role := range testRoles {
+		// Do this while importing keys that have the PEM header role set or have --role set on import
+		for _, setKeyRole := range []bool{true, false} {
+			// Make a new key for this role
+			privKey, err := trustmanager.GenerateECDSAKey(rand.Reader)
+			assert.NoError(t, err)
+
+			// Make a tempfile for importing
+			tempFile, err := ioutil.TempFile("", "pemfile")
+			assert.NoError(t, err)
+
+			// Specify the role in the PEM header
+			pemBytes, err := trustmanager.EncryptPrivateKey(privKey, role, testPassphrase)
+			assert.NoError(t, err)
+			ioutil.WriteFile(tempFile.Name(), pemBytes, 0644)
+
+			// If we need to set the key role with the --role flag, do so on import
+			if setKeyRole {
+				// If it's targets/snapshot we must specify the GUN
+				if role == data.CanonicalTargetsRole || role == data.CanonicalSnapshotRole {
+					_, err = runCommand(t, tempDir, "key", "import", tempFile.Name(), "--gun", "gun", "--role", role)
+				} else {
+					_, err = runCommand(t, tempDir, "key", "import", tempFile.Name(), "--role", role)
+				}
+			} else {
+				// If it's targets/snapshot we must specify the GUN
+				if role == data.CanonicalTargetsRole || role == data.CanonicalSnapshotRole {
+					_, err = runCommand(t, tempDir, "key", "import", tempFile.Name(), "--gun", "gun")
+				} else {
+					_, err = runCommand(t, tempDir, "key", "import", tempFile.Name())
+				}
+			}
+			assert.NoError(t, err)
+
+			// Test that we imported correctly
+			keySubdir := getKeySubdir(role, "gun")
+			_, err = os.Stat(filepath.Join(tempDir, keySubdir, privKey.ID()+".key"))
+			assert.Nil(t, err)
+
+			// Remove the input file so we can test exporting
+			assert.NoError(t, os.Remove(tempFile.Name()))
+
+			// Make a tempfile for exporting to
+			tempFile, err = ioutil.TempFile("", "pemfile")
+			assert.NoError(t, err)
+
+			// Ensure exporting this key by ID gets the same key
+			_, err = runCommand(t, tempDir, "key", "export", privKey.ID(), tempFile.Name())
+			assert.NoError(t, err)
+			// Compare the bytes of the exported file and the root key file in the repo
+			exportedBytes, err := ioutil.ReadFile(tempFile.Name())
+			assert.NoError(t, err)
+			repoBytes, err := ioutil.ReadFile(filepath.Join(tempDir, keySubdir, privKey.ID()+".key"))
+			assert.NoError(t, err)
+			assert.Equal(t, repoBytes, exportedBytes)
+
+			// Ensure exporting this key and changing the passphrase works
+			_, err = runCommand(t, tempDir, "key", "export", privKey.ID(), tempFile.Name(), "-p")
+			assert.NoError(t, err)
+
+			// Remove the export file for cleanup
+			assert.NoError(t, os.Remove(tempFile.Name()))
+		}
+	}
+}
+
 func assertNumCerts(t *testing.T, tempDir string, expectedNum int) []string {
 	output, err := runCommand(t, tempDir, "cert", "list")
 	assert.NoError(t, err)
@@ -1031,17 +1321,36 @@ func TestClientKeyPassphraseChange(t *testing.T) {
 	server := setupServer()
 	defer server.Close()
 
+	target := "sdgkadga"
+	tempFile, err := ioutil.TempFile("/tmp", "targetfile")
+	assert.NoError(t, err)
+	tempFile.Close()
+	defer os.Remove(tempFile.Name())
+
 	// -- tests --
-	_, err := runCommand(t, tempDir, "-s", server.URL, "init", "gun1")
+	_, err = runCommand(t, tempDir, "-s", server.URL, "init", "gun1")
 	assert.NoError(t, err)
 
 	// we should have three keys stored locally in total: root, targets, snapshot
-	rootIDs, _ := assertNumKeys(t, tempDir, 1, 2, true)
+	rootIDs, signingIDs := assertNumKeys(t, tempDir, 1, 2, true)
+	for _, keyID := range signingIDs {
+		// try changing the private key passphrase
+		_, err = runCommand(t, tempDir, "-s", server.URL, "key", "passwd", keyID)
+		assert.NoError(t, err)
+
+		// assert that the signing keys (number and IDs) didn't change
+		_, signingIDs = assertNumKeys(t, tempDir, 1, 2, true)
+		assert.Contains(t, signingIDs, keyID)
+
+		// make sure we can still publish with this signing key
+		assertSuccessfullyPublish(t, tempDir, server.URL, "gun1", target, tempFile.Name())
+	}
 
 	// only one rootID, try changing the private key passphrase
 	rootID := rootIDs[0]
 	_, err = runCommand(t, tempDir, "-s", server.URL, "key", "passwd", rootID)
 	assert.NoError(t, err)
+
 	// make sure we can init a new repo with this key
 	_, err = runCommand(t, tempDir, "-s", server.URL, "init", "gun2")
 	assert.NoError(t, err)

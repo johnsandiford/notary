@@ -7,31 +7,28 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/docker/notary/server/storage"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/data"
-	"github.com/docker/notary/tuf/keys"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/tuf/testutils"
 	"github.com/docker/notary/tuf/validation"
 	"github.com/stretchr/testify/assert"
-
-	"github.com/docker/notary/server/storage"
 )
 
-func copyTimestampKey(t *testing.T, fromKeyDB *keys.KeyDB,
+func copyTimestampKey(t *testing.T, fromRepo *tuf.Repo,
 	toStore storage.MetaStore, gun string) {
 
-	role := fromKeyDB.GetRole(data.CanonicalTimestampRole)
-	assert.NotNil(t, role, "No timestamp role in the KeyDB")
-	assert.Len(t, role.KeyIDs, 1, fmt.Sprintf(
-		"Expected 1 timestamp key in timestamp role, got %d", len(role.KeyIDs)))
+	role, err := fromRepo.GetBaseRole(data.CanonicalTimestampRole)
+	assert.NoError(t, err)
+	assert.NotNil(t, role, "No timestamp role in the root file")
+	assert.Len(t, role.ListKeyIDs(), 1, fmt.Sprintf(
+		"Expected 1 timestamp key in timestamp role, got %d", len(role.ListKeyIDs())))
 
-	pubTimestampKey := fromKeyDB.GetKey(role.KeyIDs[0])
-	assert.NotNil(t, pubTimestampKey,
-		"Timestamp key specified by KeyDB role not in KeysDB")
+	pubTimestampKey := role.ListKeys()[0]
 
-	err := toStore.SetKey(gun, data.CanonicalTimestampRole, pubTimestampKey.Algorithm(),
+	err = toStore.SetKey(gun, data.CanonicalTimestampRole, pubTimestampKey.Algorithm(),
 		pubTimestampKey.Public())
 	assert.NoError(t, err)
 }
@@ -69,7 +66,7 @@ func getUpdates(r, tg, sn, ts *data.Signed) (
 }
 
 func TestValidateEmptyNew(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -80,13 +77,13 @@ func TestValidateEmptyNew(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateNoNewRoot(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -98,13 +95,13 @@ func TestValidateNoNewRoot(t *testing.T) {
 	store.UpdateCurrent("testGUN", root)
 	updates := []storage.MetaUpdate{targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateNoNewTargets(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -116,13 +113,13 @@ func TestValidateNoNewTargets(t *testing.T) {
 	store.UpdateCurrent("testGUN", targets)
 	updates := []storage.MetaUpdate{root, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateOnlySnapshot(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -136,13 +133,13 @@ func TestValidateOnlySnapshot(t *testing.T) {
 
 	updates := []storage.MetaUpdate{snapshot}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateOldRoot(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -154,13 +151,13 @@ func TestValidateOldRoot(t *testing.T) {
 	store.UpdateCurrent("testGUN", root)
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateRootRotation(t *testing.T) {
-	kdb, repo, crypto, err := testutils.EmptyRepo("docker.com/notary")
+	repo, crypto, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -176,7 +173,7 @@ func TestValidateRootRotation(t *testing.T) {
 
 	rootKey, err := crypto.Create("root", data.ED25519Key)
 	assert.NoError(t, err)
-	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil, nil)
+	rootRole, err := data.NewRole("root", 1, []string{rootKey.ID()}, nil)
 	assert.NoError(t, err)
 
 	delete(repo.Root.Signed.Keys, oldRootRole.KeyIDs[0])
@@ -200,13 +197,13 @@ func TestValidateRootRotation(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(crypto, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateNoRoot(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -217,14 +214,14 @@ func TestValidateNoRoot(t *testing.T) {
 
 	updates := []storage.MetaUpdate{targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrValidation{}, err)
 }
 
 func TestValidateSnapshotMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -235,21 +232,20 @@ func TestValidateSnapshotMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadHierarchy{}, err)
 }
 
 func TestValidateSnapshotGenerateNoPrev(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
-	snapRole := kdb.GetRole(data.CanonicalSnapshotRole)
+	snapRole, err := repo.GetBaseRole(data.CanonicalSnapshotRole)
+	assert.NoError(t, err)
 
-	for _, id := range snapRole.KeyIDs {
-		k := kdb.GetKey(id)
-		assert.NotNil(t, k)
+	for _, k := range snapRole.Keys {
 		err := store.SetKey("testGUN", data.CanonicalSnapshotRole, k.Algorithm(), k.Public())
 		assert.NoError(t, err)
 	}
@@ -261,20 +257,19 @@ func TestValidateSnapshotGenerateNoPrev(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
 
 func TestValidateSnapshotGenerateWithPrev(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
-	snapRole := kdb.GetRole(data.CanonicalSnapshotRole)
+	snapRole, err := repo.GetBaseRole(data.CanonicalSnapshotRole)
+	assert.NoError(t, err)
 
-	for _, id := range snapRole.KeyIDs {
-		k := kdb.GetKey(id)
-		assert.NotNil(t, k)
+	for _, k := range snapRole.Keys {
 		err := store.SetKey("testGUN", data.CanonicalSnapshotRole, k.Algorithm(), k.Public())
 		assert.NoError(t, err)
 	}
@@ -293,7 +288,7 @@ func TestValidateSnapshotGenerateWithPrev(t *testing.T) {
 	prev, err := data.SnapshotFromSigned(sn)
 	assert.NoError(t, err)
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	updates, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 
@@ -308,14 +303,13 @@ func TestValidateSnapshotGenerateWithPrev(t *testing.T) {
 }
 
 func TestValidateSnapshotGeneratePrevCorrupt(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
-	snapRole := kdb.GetRole(data.CanonicalSnapshotRole)
+	snapRole, err := repo.GetBaseRole(data.CanonicalSnapshotRole)
+	assert.NoError(t, err)
 
-	for _, id := range snapRole.KeyIDs {
-		k := kdb.GetKey(id)
-		assert.NotNil(t, k)
+	for _, k := range snapRole.Keys {
 		err := store.SetKey("testGUN", data.CanonicalSnapshotRole, k.Algorithm(), k.Public())
 		assert.NoError(t, err)
 	}
@@ -333,20 +327,19 @@ func TestValidateSnapshotGeneratePrevCorrupt(t *testing.T) {
 	// the next version
 	store.UpdateCurrent("testGUN", snapshot)
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	updates, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 }
 
 func TestValidateSnapshotGenerateNoTargets(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
-	snapRole := kdb.GetRole(data.CanonicalSnapshotRole)
+	snapRole, err := repo.GetBaseRole(data.CanonicalSnapshotRole)
+	assert.NoError(t, err)
 
-	for _, id := range snapRole.KeyIDs {
-		k := kdb.GetKey(id)
-		assert.NotNil(t, k)
+	for _, k := range snapRole.Keys {
 		err := store.SetKey("testGUN", data.CanonicalSnapshotRole, k.Algorithm(), k.Public())
 		assert.NoError(t, err)
 	}
@@ -358,20 +351,19 @@ func TestValidateSnapshotGenerateNoTargets(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	updates, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 }
 
 func TestValidateSnapshotGenerate(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
-	snapRole := kdb.GetRole(data.CanonicalSnapshotRole)
+	snapRole, err := repo.GetBaseRole(data.CanonicalSnapshotRole)
+	assert.NoError(t, err)
 
-	for _, id := range snapRole.KeyIDs {
-		k := kdb.GetKey(id)
-		assert.NotNil(t, k)
+	for _, k := range snapRole.Keys {
 		err := store.SetKey("testGUN", data.CanonicalSnapshotRole, k.Algorithm(), k.Public())
 		assert.NoError(t, err)
 	}
@@ -385,7 +377,7 @@ func TestValidateSnapshotGenerate(t *testing.T) {
 
 	store.UpdateCurrent("testGUN", root)
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	updates, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.NoError(t, err)
 }
@@ -394,7 +386,7 @@ func TestValidateSnapshotGenerate(t *testing.T) {
 // happen if pushing an existing repository from one server to another that
 // does not have the repo.
 func TestValidateRootNoTimestampKey(t *testing.T) {
-	_, oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 
 	r, tg, sn, ts, err := testutils.Sign(oldRepo)
@@ -426,7 +418,7 @@ func TestValidateRootNoTimestampKey(t *testing.T) {
 // repository from one server to another that had already initialized the same
 // repo.
 func TestValidateRootInvalidTimestampKey(t *testing.T) {
-	_, oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 
 	r, tg, sn, ts, err := testutils.Sign(oldRepo)
@@ -449,7 +441,7 @@ func TestValidateRootInvalidTimestampKey(t *testing.T) {
 
 // If the timestamp role has a threshold > 1, validation fails.
 func TestValidateRootInvalidTimestampThreshold(t *testing.T) {
-	kdb, oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	tsRole, ok := oldRepo.Root.Signed.Roles[data.CanonicalTimestampRole]
 	assert.True(t, ok)
@@ -463,7 +455,7 @@ func TestValidateRootInvalidTimestampThreshold(t *testing.T) {
 	store := storage.NewMemStorage()
 	updates := []storage.MetaUpdate{root, targets, snapshot}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, oldRepo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "timestamp role has invalid threshold")
@@ -472,7 +464,7 @@ func TestValidateRootInvalidTimestampThreshold(t *testing.T) {
 // If any role has a threshold < 1, validation fails
 func TestValidateRootInvalidZeroThreshold(t *testing.T) {
 	for _, role := range data.BaseRoles {
-		kdb, oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+		oldRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 		assert.NoError(t, err)
 		tsRole, ok := oldRepo.Root.Signed.Roles[role]
 		assert.True(t, ok)
@@ -486,10 +478,10 @@ func TestValidateRootInvalidZeroThreshold(t *testing.T) {
 		store := storage.NewMemStorage()
 		updates := []storage.MetaUpdate{root, targets, snapshot}
 
-		copyTimestampKey(t, kdb, store, "testGUN")
+		copyTimestampKey(t, oldRepo, store, "testGUN")
 		_, err = validateUpdate(cs, "testGUN", updates, store)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "role has invalid threshold")
+		assert.Contains(t, err.Error(), "invalid threshold")
 	}
 }
 
@@ -497,7 +489,7 @@ func TestValidateRootInvalidZeroThreshold(t *testing.T) {
 // These tests remove a role from the Root file and
 // check for a validation.ErrBadRoot
 func TestValidateRootRoleMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -510,14 +502,14 @@ func TestValidateRootRoleMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
 }
 
 func TestValidateTargetsRoleMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -530,14 +522,14 @@ func TestValidateTargetsRoleMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
 }
 
 func TestValidateSnapshotRoleMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -550,7 +542,7 @@ func TestValidateSnapshotRoleMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
@@ -560,7 +552,7 @@ func TestValidateSnapshotRoleMissing(t *testing.T) {
 
 // ### Signature missing negative tests ###
 func TestValidateRootSigMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -576,14 +568,14 @@ func TestValidateRootSigMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
 }
 
 func TestValidateTargetsSigMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -597,14 +589,14 @@ func TestValidateTargetsSigMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadTargets{}, err)
 }
 
 func TestValidateSnapshotSigMissing(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -618,7 +610,7 @@ func TestValidateSnapshotSigMissing(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadSnapshot{}, err)
@@ -628,7 +620,7 @@ func TestValidateSnapshotSigMissing(t *testing.T) {
 
 // ### Corrupted metadata negative tests ###
 func TestValidateRootCorrupt(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -642,14 +634,14 @@ func TestValidateRootCorrupt(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
 }
 
 func TestValidateTargetsCorrupt(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -663,14 +655,14 @@ func TestValidateTargetsCorrupt(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadTargets{}, err)
 }
 
 func TestValidateSnapshotCorrupt(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -684,7 +676,7 @@ func TestValidateSnapshotCorrupt(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadSnapshot{}, err)
@@ -694,7 +686,7 @@ func TestValidateSnapshotCorrupt(t *testing.T) {
 
 // ### Snapshot size mismatch negative tests ###
 func TestValidateRootModifiedSize(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -712,14 +704,14 @@ func TestValidateRootModifiedSize(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
 }
 
 func TestValidateTargetsModifiedSize(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -734,7 +726,7 @@ func TestValidateTargetsModifiedSize(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadSnapshot{}, err)
@@ -744,7 +736,7 @@ func TestValidateTargetsModifiedSize(t *testing.T) {
 
 // ### Snapshot hash mismatch negative tests ###
 func TestValidateRootModifiedHash(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -763,14 +755,14 @@ func TestValidateRootModifiedHash(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadSnapshot{}, err)
 }
 
 func TestValidateTargetsModifiedHash(t *testing.T) {
-	kdb, repo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	repo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -789,7 +781,7 @@ func TestValidateTargetsModifiedHash(t *testing.T) {
 
 	updates := []storage.MetaUpdate{root, targets, snapshot, timestamp}
 
-	copyTimestampKey(t, kdb, store, "testGUN")
+	copyTimestampKey(t, repo, store, "testGUN")
 	_, err = validateUpdate(cs, "testGUN", updates, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadSnapshot{}, err)
@@ -799,18 +791,18 @@ func TestValidateTargetsModifiedHash(t *testing.T) {
 
 // ### generateSnapshot tests ###
 func TestGenerateSnapshotNoRole(t *testing.T) {
-	kdb := keys.NewDB()
-	_, err := generateSnapshot("gun", kdb, nil, nil)
+	repo := tuf.NewRepo(nil)
+	_, err := generateSnapshot("gun", repo, nil)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadRoot{}, err)
 }
 
 func TestGenerateSnapshotNoKey(t *testing.T) {
-	kdb, _, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
-	_, err = generateSnapshot("gun", kdb, nil, store)
+	_, err = generateSnapshot("gun", repo, store)
 	assert.Error(t, err)
 	assert.IsType(t, validation.ErrBadHierarchy{}, err)
 }
@@ -819,7 +811,7 @@ func TestGenerateSnapshotNoKey(t *testing.T) {
 
 // ### Target validation with delegations tests
 func TestLoadTargetsFromStore(t *testing.T) {
-	_, repo, _, err := testutils.EmptyRepo("docker.com/notary")
+	repo, _, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
@@ -860,16 +852,16 @@ func TestLoadTargetsFromStore(t *testing.T) {
 }
 
 func TestValidateTargetsLoadParent(t *testing.T) {
-	_, baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
 	k, err := cs.Create("targets/level1", data.ED25519Key)
 	assert.NoError(t, err)
-	r, err := data.NewRole("targets/level1", 1, []string{k.ID()}, []string{""}, nil)
-	assert.NoError(t, err)
 
-	err = baseRepo.UpdateDelegations(r, []data.PublicKey{k})
+	err = baseRepo.UpdateDelegationKeys("targets/level1", []data.PublicKey{k}, []string{}, 1)
+	assert.NoError(t, err)
+	err = baseRepo.UpdateDelegationPaths("targets/level1", []string{""}, []string{}, false)
 	assert.NoError(t, err)
 
 	// no targets file is created for the new delegations, so force one
@@ -900,11 +892,10 @@ func TestValidateTargetsLoadParent(t *testing.T) {
 
 	roles := map[string]storage.MetaUpdate{"targets/level1": delUpdate}
 
-	kdb := keys.NewDB()
-	valRepo := tuf.NewRepo(kdb, nil)
+	valRepo := tuf.NewRepo(nil)
 	valRepo.SetRoot(baseRepo.Root)
 
-	updates, err := loadAndValidateTargets("gun", valRepo, roles, kdb, store)
+	updates, err := loadAndValidateTargets("gun", valRepo, roles, store)
 	assert.NoError(t, err)
 	assert.Len(t, updates, 1)
 	assert.Equal(t, "targets/level1", updates[0].Role)
@@ -912,16 +903,17 @@ func TestValidateTargetsLoadParent(t *testing.T) {
 }
 
 func TestValidateTargetsParentInUpdate(t *testing.T) {
-	_, baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
 	k, err := cs.Create("targets/level1", data.ED25519Key)
 	assert.NoError(t, err)
-	r, err := data.NewRole("targets/level1", 1, []string{k.ID()}, []string{""}, nil)
-	assert.NoError(t, err)
 
-	baseRepo.UpdateDelegations(r, []data.PublicKey{k})
+	err = baseRepo.UpdateDelegationKeys("targets/level1", []data.PublicKey{k}, []string{}, 1)
+	assert.NoError(t, err)
+	err = baseRepo.UpdateDelegationPaths("targets/level1", []string{""}, []string{}, false)
+	assert.NoError(t, err)
 
 	// no targets file is created for the new delegations, so force one
 	baseRepo.InitTargets("targets/level1")
@@ -953,14 +945,13 @@ func TestValidateTargetsParentInUpdate(t *testing.T) {
 		"targets":        update,
 	}
 
-	kdb := keys.NewDB()
-	valRepo := tuf.NewRepo(kdb, nil)
+	valRepo := tuf.NewRepo(nil)
 	valRepo.SetRoot(baseRepo.Root)
 
 	// because we sort the roles, the list of returned updates
 	// will contain shallower roles first, in this case "targets",
 	// and then "targets/level1"
-	updates, err := loadAndValidateTargets("gun", valRepo, roles, kdb, store)
+	updates, err := loadAndValidateTargets("gun", valRepo, roles, store)
 	assert.NoError(t, err)
 	assert.Len(t, updates, 2)
 	assert.Equal(t, "targets", updates[0].Role)
@@ -970,16 +961,17 @@ func TestValidateTargetsParentInUpdate(t *testing.T) {
 }
 
 func TestValidateTargetsParentNotFound(t *testing.T) {
-	_, baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
 	k, err := cs.Create("targets/level1", data.ED25519Key)
 	assert.NoError(t, err)
-	r, err := data.NewRole("targets/level1", 1, []string{k.ID()}, []string{""}, nil)
-	assert.NoError(t, err)
 
-	baseRepo.UpdateDelegations(r, []data.PublicKey{k})
+	err = baseRepo.UpdateDelegationKeys("targets/level1", []data.PublicKey{k}, []string{}, 1)
+	assert.NoError(t, err)
+	err = baseRepo.UpdateDelegationPaths("targets/level1", []string{""}, []string{}, false)
+	assert.NoError(t, err)
 
 	// no targets file is created for the new delegations, so force one
 	baseRepo.InitTargets("targets/level1")
@@ -998,41 +990,29 @@ func TestValidateTargetsParentNotFound(t *testing.T) {
 
 	roles := map[string]storage.MetaUpdate{"targets/level1": delUpdate}
 
-	kdb := keys.NewDB()
-	valRepo := tuf.NewRepo(kdb, nil)
+	valRepo := tuf.NewRepo(nil)
 	valRepo.SetRoot(baseRepo.Root)
 
-	_, err = loadAndValidateTargets("gun", valRepo, roles, kdb, store)
+	_, err = loadAndValidateTargets("gun", valRepo, roles, store)
 	assert.Error(t, err)
 	assert.IsType(t, storage.ErrNotFound{}, err)
 }
 
 func TestValidateTargetsRoleNotInParent(t *testing.T) {
-	kdb, baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
+	baseRepo, cs, err := testutils.EmptyRepo("docker.com/notary")
 	assert.NoError(t, err)
 	store := storage.NewMemStorage()
 
-	k, err := cs.Create("targets/level1", data.ED25519Key)
+	level1Key, err := cs.Create("targets/level1", data.ED25519Key)
 	assert.NoError(t, err)
-	r, err := data.NewRole("targets/level1", 1, []string{k.ID()}, []string{""}, nil)
-	assert.NoError(t, err)
+	r, err := data.NewRole("targets/level1", 1, []string{level1Key.ID()}, []string{""})
 
-	kdb.AddKey(k)
-	err = kdb.AddRole(r)
-	assert.NoError(t, err)
+	baseRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Roles = []*data.Role{r}
+	baseRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Keys = data.Keys{
+		level1Key.ID(): level1Key,
+	}
 
 	baseRepo.InitTargets("targets/level1")
-
-	targets, err := baseRepo.SignTargets("targets", data.DefaultExpires(data.CanonicalTargetsRole))
-
-	tgtsJSON, err := json.Marshal(targets)
-	assert.NoError(t, err)
-	update := storage.MetaUpdate{
-		Role:    data.CanonicalTargetsRole,
-		Version: 1,
-		Data:    tgtsJSON,
-	}
-	store.UpdateCurrent("gun", update)
 
 	del, err := baseRepo.SignTargets("targets/level1", data.DefaultExpires(data.CanonicalTargetsRole))
 	assert.NoError(t, err)
@@ -1045,22 +1025,35 @@ func TestValidateTargetsRoleNotInParent(t *testing.T) {
 		Data:    delJSON,
 	}
 
+	// set back to empty so stored targets doesn't have reference to level1
+	baseRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Roles = nil
+	baseRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Keys = nil
+	targets, err := baseRepo.SignTargets(data.CanonicalTargetsRole, data.DefaultExpires(data.CanonicalTargetsRole))
+
+	tgtsJSON, err := json.Marshal(targets)
+	assert.NoError(t, err)
+	update := storage.MetaUpdate{
+		Role:    data.CanonicalTargetsRole,
+		Version: 1,
+		Data:    tgtsJSON,
+	}
+	store.UpdateCurrent("gun", update)
+
 	roles := map[string]storage.MetaUpdate{
-		"targets/level1": delUpdate,
-		"targets":        update,
+		"targets/level1":          delUpdate,
+		data.CanonicalTargetsRole: update,
 	}
 
-	kdb = keys.NewDB()
-	valRepo := tuf.NewRepo(kdb, nil)
+	valRepo := tuf.NewRepo(nil)
 	valRepo.SetRoot(baseRepo.Root)
 
 	// because we sort the roles, the list of returned updates
 	// will contain shallower roles first, in this case "targets",
 	// and then "targets/level1"
-	updates, err := loadAndValidateTargets("gun", valRepo, roles, kdb, store)
+	updates, err := loadAndValidateTargets("gun", valRepo, roles, store)
 	assert.NoError(t, err)
 	assert.Len(t, updates, 1)
-	assert.Equal(t, "targets", updates[0].Role)
+	assert.Equal(t, data.CanonicalTargetsRole, updates[0].Role)
 	assert.Equal(t, tgtsJSON, updates[0].Data)
 }
 
