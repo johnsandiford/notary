@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/notary/client/changelist"
 	"github.com/docker/notary/passphrase"
+	"github.com/docker/notary/trustpinning"
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/tuf/store"
 	"github.com/stretchr/testify/require"
@@ -28,10 +28,6 @@ func requireValidFixture(t *testing.T, notaryRepo *NotaryRepository) {
 	require.True(t, notaryRepo.tufRepo.Timestamp.Signed.Expires.After(tenYearsInFuture))
 	for _, targetObj := range notaryRepo.tufRepo.Targets {
 		require.True(t, targetObj.Signed.Expires.After(tenYearsInFuture))
-	}
-
-	for _, cert := range notaryRepo.CertStore.GetCertificates() {
-		require.True(t, cert.NotAfter.After(tenYearsInFuture))
 	}
 }
 
@@ -91,7 +87,7 @@ func Test0Dot1RepoFormat(t *testing.T) {
 	defer ts.Close()
 
 	repo, err := NewNotaryRepository(tmpDir, gun, ts.URL, http.DefaultTransport,
-		passphrase.ConstantRetriever(passwd))
+		passphrase.ConstantRetriever(passwd), trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
 	// targets should have 1 target, and it should be readable offline
@@ -108,10 +104,8 @@ func Test0Dot1RepoFormat(t *testing.T) {
 	require.NoError(t, repo.fileStore.RemoveMeta(data.CanonicalTimestampRole))
 
 	// rotate the timestamp key, since the server doesn't have that one
-	timestampPubKey, err := getRemoteKey(ts.URL, gun, data.CanonicalTimestampRole, http.DefaultTransport)
+	err = repo.RotateKey(data.CanonicalTimestampRole, true)
 	require.NoError(t, err)
-	require.NoError(
-		t, repo.rootFileKeyChange(data.CanonicalTimestampRole, changelist.ActionCreate, timestampPubKey))
 
 	require.NoError(t, repo.Publish())
 
@@ -128,6 +122,13 @@ func Test0Dot1RepoFormat(t *testing.T) {
 	require.Len(t, oldTargetsKeys, 1)
 	require.Len(t, newTargetsKeys, 1)
 	require.NotEqual(t, oldTargetsKeys[0], newTargetsKeys[0])
+
+	// rotate the snapshot key to the server and ensure that the server can re-generate the snapshot
+	// and we can download the snapshot
+	require.NoError(t, repo.RotateKey(data.CanonicalSnapshotRole, true))
+	require.NoError(t, repo.Publish())
+	err = repo.Update(false)
+	require.NoError(t, err)
 }
 
 // Ensures that the current client can download metadata that is published from notary 0.1 repos
@@ -148,9 +149,9 @@ func TestDownloading0Dot1RepoFormat(t *testing.T) {
 	defer os.RemoveAll(repoDir)
 
 	repo, err := NewNotaryRepository(repoDir, gun, ts.URL, http.DefaultTransport,
-		passphrase.ConstantRetriever(passwd))
+		passphrase.ConstantRetriever(passwd), trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
-	_, err = repo.Update(true)
+	err = repo.Update(true)
 	require.NoError(t, err, "error updating repo: %s", err)
 }

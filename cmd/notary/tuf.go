@@ -2,25 +2,25 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
-
-	"crypto/subtle"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/distribution/registry/client/transport"
 	"github.com/docker/docker/pkg/term"
 	"github.com/docker/go-connections/tlsconfig"
+	"github.com/docker/notary"
 	notaryclient "github.com/docker/notary/client"
 	"github.com/docker/notary/passphrase"
+	"github.com/docker/notary/trustpinning"
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/utils"
 	"github.com/spf13/cobra"
@@ -37,6 +37,12 @@ var cmdTufAddTemplate = usageTemplate{
 	Use:   "add [ GUN ] <target> <file>",
 	Short: "Adds the file as a target to the trusted collection.",
 	Long:  "Adds the file as a target to the local trusted collection identified by the Globally Unique Name. This is an offline operation.  Please then use `publish` to push the changes to the remote trusted collection.",
+}
+
+var cmdTufAddHashTemplate = usageTemplate{
+	Use:   "addhash [ GUN ] <target> <byte size> <hashes>",
+	Short: "Adds the byte size and hash(es) as a target to the trusted collection.",
+	Long:  "Adds the specified byte size and hash(es) as a target to the local trusted collection identified by the Globally Unique Name. This is an offline operation.  Please then use `publish` to push the changes to the remote trusted collection.",
 }
 
 var cmdTufRemoveTemplate = usageTemplate{
@@ -81,7 +87,13 @@ type tufCommander struct {
 	retriever    passphrase.Retriever
 
 	// these are for command line parsing - no need to set
-	roles []string
+	roles  []string
+	sha256 string
+	sha512 string
+
+	input  string
+	output string
+	quiet  bool
 }
 
 func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
@@ -89,7 +101,6 @@ func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 	cmd.AddCommand(cmdTufStatusTemplate.ToCommand(t.tufStatus))
 	cmd.AddCommand(cmdTufPublishTemplate.ToCommand(t.tufPublish))
 	cmd.AddCommand(cmdTufLookupTemplate.ToCommand(t.tufLookup))
-	cmd.AddCommand(cmdTufVerifyTemplate.ToCommand(t.tufVerify))
 
 	cmdTufList := cmdTufListTemplate.ToCommand(t.tufList)
 	cmdTufList.Flags().StringSliceVarP(
@@ -103,6 +114,90 @@ func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 	cmdTufRemove := cmdTufRemoveTemplate.ToCommand(t.tufRemove)
 	cmdTufRemove.Flags().StringSliceVarP(&t.roles, "roles", "r", nil, "Delegation roles to remove this target from")
 	cmd.AddCommand(cmdTufRemove)
+
+	cmdTufAddHash := cmdTufAddHashTemplate.ToCommand(t.tufAddByHash)
+	cmdTufAddHash.Flags().StringSliceVarP(&t.roles, "roles", "r", nil, "Delegation roles to add this target to")
+	cmdTufAddHash.Flags().StringVar(&t.sha256, notary.SHA256, "", "hex encoded sha256 of the target to add")
+	cmdTufAddHash.Flags().StringVar(&t.sha512, notary.SHA512, "", "hex encoded sha512 of the target to add")
+	cmd.AddCommand(cmdTufAddHash)
+
+	cmdTufVerify := cmdTufVerifyTemplate.ToCommand(t.tufVerify)
+	cmdTufVerify.Flags().StringVarP(&t.input, "input", "i", "", "Read from a file, instead of STDIN")
+	cmdTufVerify.Flags().StringVarP(&t.output, "output", "o", "", "Write to a file, instead of STDOUT")
+	cmdTufVerify.Flags().BoolVarP(&t.quiet, "quiet", "q", false, "No output except for errors")
+	cmd.AddCommand(cmdTufVerify)
+}
+
+func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
+	if len(args) < 3 || t.sha256 == "" && t.sha512 == "" {
+		cmd.Usage()
+		return fmt.Errorf("Must specify a GUN, target, byte size of target data, and at least one hash")
+	}
+	config, err := t.configGetter()
+	if err != nil {
+		return err
+	}
+
+	gun := args[0]
+	targetName := args[1]
+	targetSize := args[2]
+
+	targetInt64Len, err := strconv.ParseInt(targetSize, 0, 64)
+	if err != nil {
+		return err
+	}
+
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
+	// no online operations are performed by add so the transport argument
+	// should be nil
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	if err != nil {
+		return err
+	}
+
+	targetHash := data.Hashes{}
+	if t.sha256 != "" {
+		if len(t.sha256) != notary.Sha256HexSize {
+			return fmt.Errorf("invalid sha256 hex contents provided")
+		}
+		sha256Hash, err := hex.DecodeString(t.sha256)
+		if err != nil {
+			return err
+		}
+		targetHash[notary.SHA256] = sha256Hash
+	}
+	if t.sha512 != "" {
+		if len(t.sha512) != notary.Sha512HexSize {
+			return fmt.Errorf("invalid sha512 hex contents provided")
+		}
+		sha512Hash, err := hex.DecodeString(t.sha512)
+		if err != nil {
+			return err
+		}
+		targetHash[notary.SHA512] = sha512Hash
+	}
+
+	// Manually construct the target with the given byte size and hashes
+	target := &notaryclient.Target{Name: targetName, Hashes: targetHash, Length: targetInt64Len}
+
+	// If roles is empty, we default to adding to targets
+	if err = nRepo.AddTarget(target, t.roles...); err != nil {
+		return err
+	}
+	// Include the hash algorithms we're using for pretty printing
+	hashesUsed := []string{}
+	for hashName := range targetHash {
+		hashesUsed = append(hashesUsed, hashName)
+	}
+	cmd.Printf(
+		"Addition of target \"%s\" by %s hash to repository \"%s\" staged for next publish.\n",
+		targetName, strings.Join(hashesUsed, ", "), gun)
+	return nil
 }
 
 func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
@@ -119,10 +214,15 @@ func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
 	targetName := args[1]
 	targetPath := args[2]
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	// no online operations are performed by add so the transport argument
 	// should be nil
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -158,8 +258,13 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -169,7 +274,7 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	var rootKeyID string
 	if len(rootKeyList) < 1 {
 		cmd.Println("No root keys found. Generating a new root key...")
-		rootPublicKey, err := nRepo.CryptoService.Create(data.CanonicalRootRole, data.ECDSAKey)
+		rootPublicKey, err := nRepo.CryptoService.Create(data.CanonicalRootRole, "", data.ECDSAKey)
 		rootKeyID = rootPublicKey.ID()
 		if err != nil {
 			return err
@@ -203,8 +308,13 @@ func (t *tufCommander) tufList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -238,8 +348,13 @@ func (t *tufCommander) tufLookup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -265,8 +380,13 @@ func (t *tufCommander) tufStatus(cmd *cobra.Command, args []string) error {
 	}
 	gun := args[0]
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -309,8 +429,13 @@ func (t *tufCommander) tufPublish(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -333,10 +458,15 @@ func (t *tufCommander) tufRemove(cmd *cobra.Command, args []string) error {
 	gun := args[0]
 	targetName := args[1]
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	// no online operation are performed by remove so the transport argument
 	// should be nil.
 	repo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -360,10 +490,9 @@ func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Reads all of the data on STDIN
-	payload, err := ioutil.ReadAll(os.Stdin)
+	payload, err := getPayload(t)
 	if err != nil {
-		return fmt.Errorf("Error reading content from STDIN: %v", err)
+		return err
 	}
 
 	gun := args[0]
@@ -374,8 +503,13 @@ func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -385,15 +519,11 @@ func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error retrieving target by name:%s, error:%v", targetName, err)
 	}
 
-	// Create hasher and hash data
-	stdinHash := sha256.Sum256(payload)
-	serverHash := target.Hashes["sha256"]
-
-	if subtle.ConstantTimeCompare(stdinHash[:], serverHash) == 0 {
-		return fmt.Errorf("notary: data not present in the trusted collection")
+	if err := data.CheckHashes(payload, targetName, target.Hashes); err != nil {
+		return fmt.Errorf("data not present in the trusted collection, %v", err)
 	}
-	_, _ = os.Stdout.Write(payload)
-	return nil
+
+	return feedback(t, payload)
 }
 
 type passwordStore struct {
@@ -416,13 +546,15 @@ func (ps passwordStore) Basic(u *url.URL) (string, string) {
 
 	username := strings.TrimSpace(string(userIn))
 
-	state, err := term.SaveState(0)
-	if err != nil {
-		logrus.Errorf("error saving terminal state, cannot retrieve password: %s", err)
-		return "", ""
+	if term.IsTerminal(0) {
+		state, err := term.SaveState(0)
+		if err != nil {
+			logrus.Errorf("error saving terminal state, cannot retrieve password: %s", err)
+			return "", ""
+		}
+		term.DisableEcho(0, state)
+		defer term.RestoreTerminal(0, state)
 	}
-	term.DisableEcho(0, state)
-	defer term.RestoreTerminal(0, state)
 
 	fmt.Fprintf(os.Stdout, "Enter password: ")
 
@@ -533,10 +665,25 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
 	}
 
 	ps := passwordStore{anonymous: readOnly}
-	tokenHandler := auth.NewTokenHandler(authTransport, ps, gun, "push", "pull")
+
+	var actions []string
+	if readOnly {
+		actions = []string{"pull"}
+	} else {
+		actions = []string{"push", "pull"}
+	}
+	tokenHandler := auth.NewTokenHandler(authTransport, ps, gun, actions...)
 	basicHandler := auth.NewBasicHandler(ps)
-	modifier := transport.RequestModifier(auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler))
-	return transport.NewTransport(baseTransport, modifier), nil
+
+	modifier := auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler)
+
+	if !readOnly {
+		return newAuthRoundTripper(transport.NewTransport(baseTransport, modifier)), nil
+	}
+
+	// Try to authenticate read only repositories using basic username/password authentication
+	return newAuthRoundTripper(transport.NewTransport(baseTransport, modifier),
+		transport.NewTransport(baseTransport, auth.NewAuthorizer(challengeManager, auth.NewTokenHandler(authTransport, passwordStore{anonymous: false}, gun, actions...)))), nil
 }
 
 func getRemoteTrustServer(config *viper.Viper) string {
@@ -544,4 +691,62 @@ func getRemoteTrustServer(config *viper.Viper) string {
 		return configRemote
 	}
 	return defaultServerURL
+}
+
+func getTrustPinning(config *viper.Viper) (trustpinning.TrustPinConfig, error) {
+	var ok bool
+	// Need to parse out Certs section from config
+	certMap := config.GetStringMap("trust_pinning.certs")
+	resultCertMap := make(map[string][]string)
+	for gun, certSlice := range certMap {
+		var castedCertSlice []interface{}
+		if castedCertSlice, ok = certSlice.([]interface{}); !ok {
+			return trustpinning.TrustPinConfig{}, fmt.Errorf("invalid format for trust_pinning.certs")
+		}
+		certsForGun := make([]string, len(castedCertSlice))
+		for idx, certIDInterface := range castedCertSlice {
+			if certID, ok := certIDInterface.(string); ok {
+				certsForGun[idx] = certID
+			} else {
+				return trustpinning.TrustPinConfig{}, fmt.Errorf("invalid format for trust_pinning.certs")
+			}
+		}
+		resultCertMap[gun] = certsForGun
+	}
+	return trustpinning.TrustPinConfig{
+		DisableTOFU: config.GetBool("trust_pinning.disable_tofu"),
+		CA:          config.GetStringMapString("trust_pinning.ca"),
+		Certs:       resultCertMap,
+	}, nil
+}
+
+// authRoundTripper tries to authenticate the requests via multiple HTTP transactions (until first succeed)
+type authRoundTripper struct {
+	trippers []http.RoundTripper
+}
+
+func newAuthRoundTripper(trippers ...http.RoundTripper) http.RoundTripper {
+	return &authRoundTripper{trippers: trippers}
+}
+
+func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+
+	var resp *http.Response
+	// Try all run all transactions
+	for _, t := range a.trippers {
+		var err error
+		resp, err = t.RoundTrip(req)
+		// Reject on error
+		if err != nil {
+			return resp, err
+		}
+
+		// Stop when request is authorized/unknown error
+		if resp.StatusCode != http.StatusUnauthorized {
+			return resp, nil
+		}
+	}
+
+	// Return the last response
+	return resp, nil
 }

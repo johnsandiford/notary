@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"golang.org/x/net/context"
 
@@ -22,7 +23,7 @@ import (
 
 	"github.com/docker/notary/tuf/testutils"
 	"github.com/docker/notary/utils"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type handlerState struct {
@@ -110,8 +111,8 @@ func TestGetKeyHandlerInvalidConfiguration(t *testing.T) {
 	for errString, states := range invalidStates {
 		for _, s := range states {
 			err := getKeyHandler(getContext(s), httptest.NewRecorder(), req, vars)
-			assert.Error(t, err)
-			assert.Contains(t, err.Error(), errString)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), errString)
 		}
 	}
 }
@@ -131,14 +132,14 @@ func TestGetKeyHandlerNoRoleOrRepo(t *testing.T) {
 		// not provided
 		delete(vars, key)
 		err := getKeyHandler(getContext(state), httptest.NewRecorder(), req, vars)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unknown")
 
 		// empty
 		vars[key] = ""
 		err = getKeyHandler(getContext(state), httptest.NewRecorder(), req, vars)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unknown")
 	}
 }
 
@@ -152,8 +153,8 @@ func TestGetKeyHandlerInvalidRole(t *testing.T) {
 	req := &http.Request{Body: ioutil.NopCloser(bytes.NewBuffer(nil))}
 
 	err := getKeyHandler(getContext(state), httptest.NewRecorder(), req, vars)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid role")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid role")
 }
 
 // Getting the key for a valid role and gun succeeds
@@ -166,22 +167,22 @@ func TestGetKeyHandlerCreatesOnce(t *testing.T) {
 		vars := map[string]string{"imageName": "gun", "tufRole": role}
 		recorder := httptest.NewRecorder()
 		err := getKeyHandler(getContext(state), recorder, req, vars)
-		assert.NoError(t, err)
-		assert.True(t, len(recorder.Body.String()) > 0)
+		require.NoError(t, err)
+		require.True(t, len(recorder.Body.String()) > 0)
 	}
 }
 
 func TestGetHandlerRoot(t *testing.T) {
 	metaStore := storage.NewMemStorage()
 	repo, _, err := testutils.EmptyRepo("gun")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, "metaStore", metaStore)
 
 	root, err := repo.SignRoot(data.DefaultExpires("root"))
 	rootJSON, err := json.Marshal(root)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	metaStore.UpdateCurrent("gun", storage.MetaUpdate{Role: "root", Version: 1, Data: rootJSON})
 
 	req := &http.Request{
@@ -196,25 +197,25 @@ func TestGetHandlerRoot(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err = getHandler(ctx, rw, req, vars)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestGetHandlerTimestamp(t *testing.T) {
 	metaStore := storage.NewMemStorage()
 	repo, crypto, err := testutils.EmptyRepo("gun")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ctx := getContext(handlerState{store: metaStore, crypto: crypto})
 
 	sn, err := repo.SignSnapshot(data.DefaultExpires("snapshot"))
 	snJSON, err := json.Marshal(sn)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	metaStore.UpdateCurrent(
 		"gun", storage.MetaUpdate{Role: "snapshot", Version: 1, Data: snJSON})
 
 	ts, err := repo.SignTimestamp(data.DefaultExpires("timestamp"))
 	tsJSON, err := json.Marshal(ts)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	metaStore.UpdateCurrent(
 		"gun", storage.MetaUpdate{Role: "timestamp", Version: 1, Data: tsJSON})
 
@@ -230,21 +231,28 @@ func TestGetHandlerTimestamp(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err = getHandler(ctx, rw, req, vars)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestGetHandlerSnapshot(t *testing.T) {
 	metaStore := storage.NewMemStorage()
 	repo, crypto, err := testutils.EmptyRepo("gun")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ctx := getContext(handlerState{store: metaStore, crypto: crypto})
 
+	// Need to create a timestamp and snapshot
 	sn, err := repo.SignSnapshot(data.DefaultExpires("snapshot"))
 	snJSON, err := json.Marshal(sn)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	metaStore.UpdateCurrent(
 		"gun", storage.MetaUpdate{Role: "snapshot", Version: 1, Data: snJSON})
+
+	ts, err := repo.SignTimestamp(data.DefaultExpires("timestamp"))
+	tsJSON, err := json.Marshal(ts)
+	require.NoError(t, err)
+	metaStore.UpdateCurrent(
+		"gun", storage.MetaUpdate{Role: "timestamp", Version: 1, Data: tsJSON})
 
 	req := &http.Request{
 		Body: ioutil.NopCloser(bytes.NewBuffer(nil)),
@@ -258,7 +266,7 @@ func TestGetHandlerSnapshot(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err = getHandler(ctx, rw, req, vars)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestGetHandler404(t *testing.T) {
@@ -279,7 +287,7 @@ func TestGetHandler404(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err := getHandler(ctx, rw, req, vars)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestGetHandlerNilData(t *testing.T) {
@@ -301,7 +309,7 @@ func TestGetHandlerNilData(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err := getHandler(ctx, rw, req, vars)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestGetHandlerNoStorage(t *testing.T) {
@@ -312,7 +320,7 @@ func TestGetHandlerNoStorage(t *testing.T) {
 	}
 
 	err := GetHandler(ctx, nil, req)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 // a validation failure, such as a snapshots file being missing, will be
@@ -324,14 +332,14 @@ func TestAtomicUpdateValidationFailurePropagated(t *testing.T) {
 	vars := map[string]string{"imageName": gun}
 
 	repo, cs, err := testutils.EmptyRepo(gun)
-	assert.NoError(t, err)
-	copyTimestampKey(t, repo, metaStore, gun)
-	state := handlerState{store: metaStore, crypto: cs}
+	require.NoError(t, err)
+
+	state := handlerState{store: metaStore, crypto: testutils.CopyKeys(t, cs, data.CanonicalTimestampRole)}
 
 	r, tg, sn, ts, err := testutils.Sign(repo)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	rs, tgs, _, _, err := testutils.Serialize(r, tg, sn, ts)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	req, err := store.NewMultiPartMetaRequest("", map[string][]byte{
 		data.CanonicalRootRole:    rs,
@@ -341,21 +349,21 @@ func TestAtomicUpdateValidationFailurePropagated(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err = atomicUpdateHandler(getContext(state), rw, req, vars)
-	assert.Error(t, err)
+	require.Error(t, err)
 	errorObj, ok := err.(errcode.Error)
-	assert.True(t, ok, "Expected an errcode.Error, got %v", err)
-	assert.Equal(t, errors.ErrInvalidUpdate, errorObj.Code)
+	require.True(t, ok, "Expected an errcode.Error, got %v", err)
+	require.Equal(t, errors.ErrInvalidUpdate, errorObj.Code)
 	serializable, ok := errorObj.Detail.(*validation.SerializableError)
-	assert.True(t, ok, "Expected a SerializableObject, got %v", errorObj.Detail)
-	assert.IsType(t, validation.ErrBadHierarchy{}, serializable.Error)
+	require.True(t, ok, "Expected a SerializableObject, got %v", errorObj.Detail)
+	require.IsType(t, validation.ErrBadHierarchy{}, serializable.Error)
 }
 
 type failStore struct {
 	storage.MemStorage
 }
 
-func (s *failStore) GetCurrent(_, _ string) ([]byte, error) {
-	return nil, fmt.Errorf("oh no! storage has failed")
+func (s *failStore) GetCurrent(_, _ string) (*time.Time, []byte, error) {
+	return nil, nil, fmt.Errorf("oh no! storage has failed")
 }
 
 // a non-validation failure, such as the storage failing, will not be propagated
@@ -366,14 +374,14 @@ func TestAtomicUpdateNonValidationFailureNotPropagated(t *testing.T) {
 	vars := map[string]string{"imageName": gun}
 
 	repo, cs, err := testutils.EmptyRepo(gun)
-	assert.NoError(t, err)
-	copyTimestampKey(t, repo, metaStore, gun)
-	state := handlerState{store: &failStore{*metaStore}, crypto: cs}
+	require.NoError(t, err)
+
+	state := handlerState{store: &failStore{*metaStore}, crypto: testutils.CopyKeys(t, cs, data.CanonicalTimestampRole)}
 
 	r, tg, sn, ts, err := testutils.Sign(repo)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	rs, tgs, sns, _, err := testutils.Serialize(r, tg, sn, ts)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	req, err := store.NewMultiPartMetaRequest("", map[string][]byte{
 		data.CanonicalRootRole:     rs,
@@ -384,11 +392,11 @@ func TestAtomicUpdateNonValidationFailureNotPropagated(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err = atomicUpdateHandler(getContext(state), rw, req, vars)
-	assert.Error(t, err)
+	require.Error(t, err)
 	errorObj, ok := err.(errcode.Error)
-	assert.True(t, ok, "Expected an errcode.Error, got %v", err)
-	assert.Equal(t, errors.ErrInvalidUpdate, errorObj.Code)
-	assert.Nil(t, errorObj.Detail)
+	require.True(t, ok, "Expected an errcode.Error, got %v", err)
+	require.Equal(t, errors.ErrInvalidUpdate, errorObj.Code)
+	require.Nil(t, errorObj.Detail)
 }
 
 type invalidVersionStore struct {
@@ -407,14 +415,15 @@ func TestAtomicUpdateVersionErrorPropagated(t *testing.T) {
 	vars := map[string]string{"imageName": gun}
 
 	repo, cs, err := testutils.EmptyRepo(gun)
-	assert.NoError(t, err)
-	copyTimestampKey(t, repo, metaStore, gun)
-	state := handlerState{store: &invalidVersionStore{*metaStore}, crypto: cs}
+	require.NoError(t, err)
+
+	state := handlerState{
+		store: &invalidVersionStore{*metaStore}, crypto: testutils.CopyKeys(t, cs, data.CanonicalTimestampRole)}
 
 	r, tg, sn, ts, err := testutils.Sign(repo)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	rs, tgs, sns, _, err := testutils.Serialize(r, tg, sn, ts)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	req, err := store.NewMultiPartMetaRequest("", map[string][]byte{
 		data.CanonicalRootRole:     rs,
@@ -425,9 +434,9 @@ func TestAtomicUpdateVersionErrorPropagated(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	err = atomicUpdateHandler(getContext(state), rw, req, vars)
-	assert.Error(t, err)
+	require.Error(t, err)
 	errorObj, ok := err.(errcode.Error)
-	assert.True(t, ok, "Expected an errcode.Error, got %v", err)
-	assert.Equal(t, errors.ErrOldVersion, errorObj.Code)
-	assert.Equal(t, storage.ErrOldVersion{}, errorObj.Detail)
+	require.True(t, ok, "Expected an errcode.Error, got %v", err)
+	require.Equal(t, errors.ErrOldVersion, errorObj.Code)
+	require.Equal(t, storage.ErrOldVersion{}, errorObj.Detail)
 }

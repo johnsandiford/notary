@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 
 	notaryclient "github.com/docker/notary/client"
 	"github.com/docker/notary/passphrase"
@@ -83,9 +84,14 @@ func (d *delegationCommander) delegationsList(cmd *cobra.Command, args []string)
 		return err
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	// initialize repo with transport to get latest state of the world before listing delegations
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, d.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, d.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -137,10 +143,15 @@ func (d *delegationCommander) delegationRemove(cmd *cobra.Command, args []string
 		d.paths = nil
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	// no online operations are performed by add so the transport argument
 	// should be nil
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, d.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, d.retriever, trustPin)
 	if err != nil {
 		return err
 	}
@@ -149,7 +160,7 @@ func (d *delegationCommander) delegationRemove(cmd *cobra.Command, args []string
 		cmd.Println("\nAre you sure you want to remove all data for this delegation? (yes/no)")
 		// Ask for confirmation before force removing delegation
 		if !d.forceYes {
-			confirmed := askConfirm()
+			confirmed := askConfirm(os.Stdin)
 			if !confirmed {
 				fatalf("Aborting action.")
 			}
@@ -243,10 +254,15 @@ func (d *delegationCommander) delegationAdd(cmd *cobra.Command, args []string) e
 		d.paths = []string{""}
 	}
 
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
 	// no online operations are performed by add so the transport argument
 	// should be nil
 	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, d.retriever)
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, d.retriever, trustPin)
 	if err != nil {
 		return err
 	}

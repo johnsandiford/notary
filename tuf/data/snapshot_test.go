@@ -16,7 +16,8 @@ import (
 func validSnapshotTemplate() *SignedSnapshot {
 	return &SignedSnapshot{
 		Signed: Snapshot{
-			Type: "Snapshot", Version: 1, Expires: time.Now(), Meta: Files{
+			SignedCommon: SignedCommon{Type: TUFTypes[CanonicalSnapshotRole], Version: 1, Expires: time.Now()},
+			Meta: Files{
 				CanonicalRootRole:    FileMeta{Hashes: Hashes{"sha256": bytes.Repeat([]byte("a"), sha256.Size)}},
 				CanonicalTargetsRole: FileMeta{Hashes: Hashes{"sha256": bytes.Repeat([]byte("a"), sha256.Size)}},
 				"targets/a":          FileMeta{},
@@ -28,7 +29,8 @@ func validSnapshotTemplate() *SignedSnapshot {
 }
 
 func TestSnapshotToSignedMarshalsSignedPortionWithCanonicalJSON(t *testing.T) {
-	sn := SignedSnapshot{Signed: Snapshot{Type: "Snapshot", Version: 1, Expires: time.Now()}}
+	sn := SignedSnapshot{Signed: Snapshot{SignedCommon: SignedCommon{
+		Type: TUFTypes[CanonicalSnapshotRole], Version: 1, Expires: time.Now()}}}
 	signedCanonical, err := sn.ToSigned()
 	require.NoError(t, err)
 
@@ -39,13 +41,14 @@ func TestSnapshotToSignedMarshalsSignedPortionWithCanonicalJSON(t *testing.T) {
 
 	// don't bother testing regular JSON because it might not be different
 
-	require.True(t, bytes.Equal(signedCanonical.Signed, castedCanonical),
+	require.True(t, bytes.Equal(*signedCanonical.Signed, castedCanonical),
 		"expected %v == %v", signedCanonical.Signed, castedCanonical)
 }
 
 func TestSnapshotToSignCopiesSignatures(t *testing.T) {
 	sn := SignedSnapshot{
-		Signed: Snapshot{Type: "Snapshot", Version: 2, Expires: time.Now()},
+		Signed: Snapshot{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalSnapshotRole], Version: 2, Expires: time.Now()}},
 		Signatures: []Signature{
 			{KeyID: "key1", Method: "method1", Signature: []byte("hello")},
 		},
@@ -65,7 +68,8 @@ func TestSnapshotToSignedMarshallingErrorsPropagated(t *testing.T) {
 	setDefaultSerializer(errorSerializer{})
 	defer setDefaultSerializer(canonicalJSON{})
 	sn := SignedSnapshot{
-		Signed: Snapshot{Type: "Snapshot", Version: 2, Expires: time.Now()},
+		Signed: Snapshot{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalSnapshotRole], Version: 2, Expires: time.Now()}},
 	}
 	_, err := sn.ToSigned()
 	require.EqualError(t, err, "bad")
@@ -73,7 +77,8 @@ func TestSnapshotToSignedMarshallingErrorsPropagated(t *testing.T) {
 
 func TestSnapshotMarshalJSONMarshalsSignedWithRegularJSON(t *testing.T) {
 	sn := SignedSnapshot{
-		Signed: Snapshot{Type: "Snapshot", Version: 1, Expires: time.Now()},
+		Signed: Snapshot{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalSnapshotRole], Version: 1, Expires: time.Now()}},
 		Signatures: []Signature{
 			{KeyID: "key1", Method: "method1", Signature: []byte("hello")},
 			{KeyID: "key2", Method: "method2", Signature: []byte("there")},
@@ -98,7 +103,8 @@ func TestSnapshotMarshalJSONMarshallingErrorsPropagated(t *testing.T) {
 	setDefaultSerializer(errorSerializer{})
 	defer setDefaultSerializer(canonicalJSON{})
 	sn := SignedSnapshot{
-		Signed: Snapshot{Type: "Snapshot", Version: 2, Expires: time.Now()},
+		Signed: Snapshot{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalSnapshotRole], Version: 2, Expires: time.Now()}},
 	}
 	_, err := sn.MarshalJSON()
 	require.EqualError(t, err, "bad")
@@ -182,10 +188,26 @@ func TestSnapshotFromSignedValidatesRoleType(t *testing.T) {
 	}
 
 	sn = validSnapshotTemplate()
-	sn.Signed.Type = "Snapshot"
+	sn.Signed.Type = TUFTypes[CanonicalSnapshotRole]
 	sSnapshot, err := snapshotToSignedAndBack(t, sn)
 	require.NoError(t, err)
-	require.Equal(t, "Snapshot", sSnapshot.Signed.Type)
+	require.Equal(t, TUFTypes[CanonicalSnapshotRole], sSnapshot.Signed.Type)
+}
+
+// The version cannot be negative
+func TestSnapshotFromSignedValidatesVersion(t *testing.T) {
+	sn := validSnapshotTemplate()
+	sn.Signed.Version = -1
+	_, err := snapshotToSignedAndBack(t, sn)
+	require.IsType(t, ErrInvalidMetadata{}, err)
+
+	sn.Signed.Version = 0
+	_, err = snapshotToSignedAndBack(t, sn)
+	require.IsType(t, ErrInvalidMetadata{}, err)
+
+	sn.Signed.Version = 1
+	_, err = snapshotToSignedAndBack(t, sn)
+	require.NoError(t, err)
 }
 
 // GetMeta returns the checksum, or an error if it is missing.

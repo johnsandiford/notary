@@ -1,47 +1,50 @@
 package handlers
 
 import (
-	"io"
+	"time"
 
 	"golang.org/x/net/context"
 
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"github.com/docker/notary"
 	"github.com/docker/notary/server/errors"
-	"github.com/docker/notary/server/snapshot"
 	"github.com/docker/notary/server/storage"
 	"github.com/docker/notary/server/timestamp"
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/tuf/signed"
 )
 
-func getRole(ctx context.Context, w io.Writer, store storage.MetaStore, gun, role, checksum string) error {
+func getRole(ctx context.Context, store storage.MetaStore, gun, role, checksum string) (*time.Time, []byte, error) {
 	var (
-		out []byte
-		err error
+		lastModified *time.Time
+		out          []byte
+		err          error
 	)
 	if checksum == "" {
 		// the timestamp and snapshot might be server signed so are
 		// handled specially
 		switch role {
 		case data.CanonicalTimestampRole, data.CanonicalSnapshotRole:
-			return getMaybeServerSigned(ctx, w, store, gun, role)
+			return getMaybeServerSigned(ctx, store, gun, role)
 		}
-		out, err = store.GetCurrent(gun, role)
+		lastModified, out, err = store.GetCurrent(gun, role)
 	} else {
-		out, err = store.GetChecksum(gun, role, checksum)
+		lastModified, out, err = store.GetChecksum(gun, role, checksum)
 	}
 
 	if err != nil {
 		if _, ok := err.(storage.ErrNotFound); ok {
-			return errors.ErrMetadataNotFound.WithDetail(err)
+			return nil, nil, errors.ErrMetadataNotFound.WithDetail(err)
 		}
-		return errors.ErrUnknown.WithDetail(err)
+		return nil, nil, errors.ErrUnknown.WithDetail(err)
 	}
 	if out == nil {
-		return errors.ErrMetadataNotFound.WithDetail(nil)
+		return nil, nil, errors.ErrMetadataNotFound.WithDetail(nil)
 	}
-	w.Write(out)
 
-	return nil
+	return lastModified, out, nil
 }
 
 // getMaybeServerSigned writes the current snapshot or timestamp (based on the
@@ -49,32 +52,47 @@ func getRole(ctx context.Context, w io.Writer, store storage.MetaStore, gun, rol
 // the timestamp and snapshot, based on the keys held by the server, a new one
 // might be generated and signed due to expiry of the previous one or updates
 // to other roles.
-func getMaybeServerSigned(ctx context.Context, w io.Writer, store storage.MetaStore, gun, role string) error {
+func getMaybeServerSigned(ctx context.Context, store storage.MetaStore, gun, role string) (*time.Time, []byte, error) {
 	cryptoServiceVal := ctx.Value("cryptoService")
 	cryptoService, ok := cryptoServiceVal.(signed.CryptoService)
 	if !ok {
-		return errors.ErrNoCryptoService.WithDetail(nil)
+		return nil, nil, errors.ErrNoCryptoService.WithDetail(nil)
 	}
 
 	var (
-		out []byte
-		err error
+		lastModified *time.Time
+		out          []byte
+		err          error
 	)
-	switch role {
-	case data.CanonicalSnapshotRole:
-		out, err = snapshot.GetOrCreateSnapshot(gun, store, cryptoService)
-	case data.CanonicalTimestampRole:
-		out, err = timestamp.GetOrCreateTimestamp(gun, store, cryptoService)
+	if role != data.CanonicalTimestampRole && role != data.CanonicalSnapshotRole {
+		return nil, nil, fmt.Errorf("role %s cannot be server signed", role)
 	}
+	lastModified, out, err = timestamp.GetOrCreateTimestamp(gun, store, cryptoService)
 	if err != nil {
 		switch err.(type) {
 		case *storage.ErrNoKey, storage.ErrNotFound:
-			return errors.ErrMetadataNotFound.WithDetail(err)
+			return nil, nil, errors.ErrMetadataNotFound.WithDetail(err)
 		default:
-			return errors.ErrUnknown.WithDetail(err)
+			return nil, nil, errors.ErrUnknown.WithDetail(err)
 		}
 	}
 
-	w.Write(out)
-	return nil
+	// If we wanted the snapshot, get it by checksum from the timestamp data
+	if role == data.CanonicalSnapshotRole {
+		ts := new(data.SignedTimestamp)
+		if err := json.Unmarshal(out, ts); err != nil {
+			return nil, nil, err
+		}
+		snapshotChecksums, err := ts.GetSnapshot()
+		if err != nil || snapshotChecksums == nil {
+			return nil, nil, fmt.Errorf("could not retrieve latest snapshot checksum")
+		}
+		if snapshotSha256Bytes, ok := snapshotChecksums.Hashes[notary.SHA256]; ok {
+			snapshotSha256Hex := hex.EncodeToString(snapshotSha256Bytes[:])
+			return store.GetChecksum(gun, role, snapshotSha256Hex)
+		}
+		return nil, nil, fmt.Errorf("could not retrieve sha256 snapshot checksum")
+	}
+
+	return lastModified, out, nil
 }

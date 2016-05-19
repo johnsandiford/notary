@@ -1,15 +1,11 @@
 package main
 
 import (
-	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math"
-	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/docker/notary/client"
 	"github.com/docker/notary/trustmanager"
@@ -96,19 +92,12 @@ func prettyPrintKeys(keyStores []trustmanager.KeyStore, writer io.Writer) {
 	var info []keyInfo
 
 	for _, store := range keyStores {
-		for keyPath, role := range store.ListKeys() {
-			gun := ""
-			if role != data.CanonicalRootRole {
-				dirPath := filepath.Dir(keyPath)
-				if dirPath != "." { // no gun
-					gun = dirPath
-				}
-			}
+		for keyID, keyIDInfo := range store.ListKeys() {
 			info = append(info, keyInfo{
-				role:     role,
+				role:     keyIDInfo.Role,
 				location: store.Name(),
-				gun:      gun,
-				keyID:    filepath.Base(keyPath),
+				gun:      keyIDInfo.Gun,
+				keyID:    keyID,
 			})
 		}
 	}
@@ -191,7 +180,7 @@ func prettyPrintRoles(rs []*data.Role, writer io.Writer, roleType string) {
 		table.Append([]string{
 			r.Name,
 			prettyPrintPaths(r.Paths),
-			strings.Join(r.KeyIDs, ","),
+			strings.Join(r.KeyIDs, "\n"),
 			fmt.Sprintf("%v", r.Threshold),
 		})
 	}
@@ -210,54 +199,5 @@ func prettyPrintPaths(paths []string) string {
 		}
 		prettyPaths = append(prettyPaths, path)
 	}
-	return strings.Join(prettyPaths, ",")
-}
-
-// --- pretty printing certs ---
-
-// cert by repo name then expiry time.  Don't bother sorting by fingerprint.
-type certSorter []*x509.Certificate
-
-func (t certSorter) Len() int      { return len(t) }
-func (t certSorter) Swap(i, j int) { t[i], t[j] = t[j], t[i] }
-func (t certSorter) Less(i, j int) bool {
-	if t[i].Subject.CommonName < t[j].Subject.CommonName {
-		return true
-	} else if t[i].Subject.CommonName > t[j].Subject.CommonName {
-		return false
-	}
-
-	return t[i].NotAfter.Before(t[j].NotAfter)
-}
-
-// Given a list of Ceritifcates in order of listing preference, pretty-prints
-// the cert common name, fingerprint, and expiry
-func prettyPrintCerts(certs []*x509.Certificate, writer io.Writer) {
-	if len(certs) == 0 {
-		writer.Write([]byte("\nNo trusted root certificates present.\n\n"))
-		return
-	}
-
-	sort.Stable(certSorter(certs))
-
-	table := getTable([]string{
-		"GUN", "Fingerprint of Trusted Root Certificate", "Expires In"}, writer)
-
-	for _, c := range certs {
-		days := math.Floor(c.NotAfter.Sub(time.Now()).Hours() / 24)
-		expiryString := "< 1 day"
-		if days == 1 {
-			expiryString = "1 day"
-		} else if days > 1 {
-			expiryString = fmt.Sprintf("%d days", int(days))
-		}
-
-		certID, err := trustmanager.FingerprintCert(c)
-		if err != nil {
-			fatalf("Could not fingerprint certificate: %v", err)
-		}
-
-		table.Append([]string{c.Subject.CommonName, certID, expiryString})
-	}
-	table.Render()
+	return strings.Join(prettyPaths, "\n")
 }

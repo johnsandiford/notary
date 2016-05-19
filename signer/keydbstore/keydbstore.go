@@ -66,9 +66,9 @@ func (s *KeyDBStore) Name() string {
 	return "database"
 }
 
-// AddKey stores the contents of a private key. Both name and alias are ignored,
+// AddKey stores the contents of a private key. Both role and gun are ignored,
 // we always use Key IDs as name, and don't support aliases
-func (s *KeyDBStore) AddKey(name, alias string, privKey data.PrivateKey) error {
+func (s *KeyDBStore) AddKey(keyInfo trustmanager.KeyInfo, privKey data.PrivateKey) error {
 
 	passphrase, _, err := s.retriever(privKey.ID(), s.defaultPassAlias, false, 1)
 	if err != nil {
@@ -106,18 +106,18 @@ func (s *KeyDBStore) AddKey(name, alias string, privKey data.PrivateKey) error {
 }
 
 // GetKey returns the PrivateKey given a KeyID
-func (s *KeyDBStore) GetKey(name string) (data.PrivateKey, string, error) {
+func (s *KeyDBStore) GetKey(keyID string) (data.PrivateKey, string, error) {
 	s.Lock()
 	defer s.Unlock()
-	cachedKeyEntry, ok := s.cachedKeys[name]
+	cachedKeyEntry, ok := s.cachedKeys[keyID]
 	if ok {
 		return cachedKeyEntry, "", nil
 	}
 
 	// Retrieve the GORM private key from the database
 	dbPrivateKey := GormPrivateKey{}
-	if s.db.Where(&GormPrivateKey{KeyID: name}).First(&dbPrivateKey).RecordNotFound() {
-		return nil, "", trustmanager.ErrKeyNotFound{}
+	if s.db.Where(&GormPrivateKey{KeyID: keyID}).First(&dbPrivateKey).RecordNotFound() {
+		return nil, "", trustmanager.ErrKeyNotFound{KeyID: keyID}
 	}
 
 	// Get the passphrase to use for this key
@@ -145,22 +145,27 @@ func (s *KeyDBStore) GetKey(name string) (data.PrivateKey, string, error) {
 	return privKey, "", nil
 }
 
+// GetKeyInfo returns the PrivateKey's role and gun in a KeyInfo given a KeyID
+func (s *KeyDBStore) GetKeyInfo(keyID string) (trustmanager.KeyInfo, error) {
+	return trustmanager.KeyInfo{}, fmt.Errorf("GetKeyInfo currently not supported for KeyDBStore, as it does not track roles or GUNs")
+}
+
 // ListKeys always returns nil. This method is here to satisfy the KeyStore interface
-func (s *KeyDBStore) ListKeys() map[string]string {
+func (s *KeyDBStore) ListKeys() map[string]trustmanager.KeyInfo {
 	return nil
 }
 
 // RemoveKey removes the key from the keyfilestore
-func (s *KeyDBStore) RemoveKey(name string) error {
+func (s *KeyDBStore) RemoveKey(keyID string) error {
 	s.Lock()
 	defer s.Unlock()
 
-	delete(s.cachedKeys, name)
+	delete(s.cachedKeys, keyID)
 
 	// Retrieve the GORM private key from the database
 	dbPrivateKey := GormPrivateKey{}
-	if s.db.Where(&GormPrivateKey{KeyID: name}).First(&dbPrivateKey).RecordNotFound() {
-		return trustmanager.ErrKeyNotFound{}
+	if s.db.Where(&GormPrivateKey{KeyID: keyID}).First(&dbPrivateKey).RecordNotFound() {
+		return trustmanager.ErrKeyNotFound{KeyID: keyID}
 	}
 
 	// Delete the key from the database
@@ -170,11 +175,11 @@ func (s *KeyDBStore) RemoveKey(name string) error {
 }
 
 // RotateKeyPassphrase rotates the key-encryption-key
-func (s *KeyDBStore) RotateKeyPassphrase(name, newPassphraseAlias string) error {
+func (s *KeyDBStore) RotateKeyPassphrase(keyID, newPassphraseAlias string) error {
 	// Retrieve the GORM private key from the database
 	dbPrivateKey := GormPrivateKey{}
-	if s.db.Where(&GormPrivateKey{KeyID: name}).First(&dbPrivateKey).RecordNotFound() {
-		return trustmanager.ErrKeyNotFound{}
+	if s.db.Where(&GormPrivateKey{KeyID: keyID}).First(&dbPrivateKey).RecordNotFound() {
+		return trustmanager.ErrKeyNotFound{KeyID: keyID}
 	}
 
 	// Get the current passphrase to use for this key
@@ -210,13 +215,8 @@ func (s *KeyDBStore) RotateKeyPassphrase(name, newPassphraseAlias string) error 
 }
 
 // ExportKey is currently unimplemented and will always return an error
-func (s *KeyDBStore) ExportKey(name string) ([]byte, error) {
+func (s *KeyDBStore) ExportKey(keyID string) ([]byte, error) {
 	return nil, errors.New("Exporting from a KeyDBStore is not supported.")
-}
-
-// ImportKey is currently unimplemented and will always return an error
-func (s *KeyDBStore) ImportKey(pemBytes []byte, alias string) error {
-	return errors.New("Importing into a KeyDBStore is not supported")
 }
 
 // HealthCheck verifies that DB exists and is query-able

@@ -2,10 +2,9 @@ package main
 
 import (
 	"archive/zip"
-	"bufio"
 	"fmt"
 	"io"
-	"net/http"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,7 +19,6 @@ import (
 	"github.com/docker/notary/tuf/data"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"io/ioutil"
 )
 
 var cmdKeyTemplate = usageTemplate{
@@ -36,9 +34,9 @@ var cmdKeyListTemplate = usageTemplate{
 }
 
 var cmdRotateKeyTemplate = usageTemplate{
-	Use:   "rotate [ GUN ]",
-	Short: "Rotate the signing (non-root) keys for the given Globally Unique Name.",
-	Long:  "Removes all the old signing (non-root) keys for the given Globally Unique Name, and generates new ones.  This only makes local changes - please use then `notary publish` to push the key rotation changes to the remote server.",
+	Use:   "rotate [ GUN ] [ key role ]",
+	Short: "Rotate a signing (non-root) key of the given type for the given Globally Unique Name and role.",
+	Long:  `Generates a new key for the given Globally Unique Name and role (one of "snapshot", "targets", "root", or "timestamp").  If rotating to a server-managed key, a new key is requested from the server rather than generated.  If the generation or key request is successful, the key rotation is immediately published.  No other changes, even if they are staged, will be published.`,
 }
 
 var cmdKeyGenerateRootKeyTemplate = usageTemplate{
@@ -95,6 +93,8 @@ type keyCommander struct {
 	keysImportRole             string
 	rotateKeyRole              string
 	rotateKeyServerManaged     bool
+
+	input io.Reader
 }
 
 func (k *keyCommander) GetCommand() *cobra.Command {
@@ -125,13 +125,9 @@ func (k *keyCommander) GetCommand() *cobra.Command {
 
 	cmdRotateKey := cmdRotateKeyTemplate.ToCommand(k.keysRotate)
 	cmdRotateKey.Flags().BoolVarP(&k.rotateKeyServerManaged, "server-managed", "r",
-		false, "Signing and key management will be handled by the remote server. "+
-			"(no key will be generated or stored locally) "+
-			"Can only be used in conjunction with --key-type.")
-	cmdRotateKey.Flags().StringVarP(&k.rotateKeyRole, "key-type", "t", "",
-		`Key type to rotate.  Supported values: "targets", "snapshot". `+
-			`If not provided, both targets and snapshot keys will be rotated, `+
-			`and the new keys will be locally generated and stored.`)
+		false, "Signing and key management will be handled by the remote server "+
+			"(no key will be generated or stored locally). "+
+			"Required for timestamp role, optional for snapshot role")
 	cmd.AddCommand(cmdRotateKey)
 
 	return cmd
@@ -147,7 +143,7 @@ func (k *keyCommander) keysList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, false)
 	if err != nil {
 		return err
 	}
@@ -188,13 +184,13 @@ func (k *keyCommander) keysGenerateRootKey(cmd *cobra.Command, args []string) er
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, true)
 	if err != nil {
 		return err
 	}
-	cs := cryptoservice.NewCryptoService("", ks...)
+	cs := cryptoservice.NewCryptoService(ks...)
 
-	pubKey, err := cs.Create(data.CanonicalRootRole, algorithm)
+	pubKey, err := cs.Create(data.CanonicalRootRole, "", algorithm)
 	if err != nil {
 		return fmt.Errorf("Failed to create a new root key: %v", err)
 	}
@@ -214,13 +210,13 @@ func (k *keyCommander) keysBackup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, false)
+	ks, err := k.getKeyStores(config, false, false)
 	if err != nil {
 		return err
 	}
 	exportFilename := args[0]
 
-	cs := cryptoservice.NewCryptoService("", ks...)
+	cs := cryptoservice.NewCryptoService(ks...)
 
 	exportFile, err := os.Create(exportFilename)
 	if err != nil {
@@ -263,31 +259,16 @@ func (k *keyCommander) keysExport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, false)
 	if err != nil {
 		return err
 	}
 
-	// Search for this key in all of our keystores, determine whether this key has a GUN
-	keyGun := ""
-	keyRole := ""
-	for _, store := range ks {
-		for keypath, role := range store.ListKeys() {
-			if filepath.Base(keypath) == keyID {
-				keyRole = role
-				if role == data.CanonicalRootRole {
-					continue
-				}
-				dirPath := filepath.Dir(keypath)
-				if dirPath != "." { // no gun
-					keyGun = dirPath
-				}
-				break
-			}
-		}
+	cs := cryptoservice.NewCryptoService(ks...)
+	keyInfo, err := cs.GetKeyInfo(keyID)
+	if err != nil {
+		return fmt.Errorf("Could not retrieve info for key %s", keyID)
 	}
-
-	cs := cryptoservice.NewCryptoService(keyGun, ks...)
 
 	exportFile, err := os.Create(exportFilename)
 	if err != nil {
@@ -299,12 +280,12 @@ func (k *keyCommander) keysExport(cmd *cobra.Command, args []string) error {
 		exportRetriever := k.getRetriever()
 		err = cs.ExportKeyReencrypt(exportFile, keyID, exportRetriever)
 	} else {
-		err = cs.ExportKey(exportFile, keyID, keyRole)
+		err = cs.ExportKey(exportFile, keyID, keyInfo.Role)
 	}
 	exportFile.Close()
 	if err != nil {
 		os.Remove(exportFilename)
-		return fmt.Errorf("Error exporting %s key: %v", keyRole, err)
+		return fmt.Errorf("Error exporting %s key: %v", keyInfo.Role, err)
 	}
 	return nil
 }
@@ -322,11 +303,11 @@ func (k *keyCommander) keysRestore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, false)
 	if err != nil {
 		return err
 	}
-	cs := cryptoservice.NewCryptoService("", ks...)
+	cs := cryptoservice.NewCryptoService(ks...)
 
 	zipReader, err := zip.OpenReader(importFilename)
 	if err != nil {
@@ -334,7 +315,7 @@ func (k *keyCommander) keysRestore(cmd *cobra.Command, args []string) error {
 	}
 	defer zipReader.Close()
 
-	err = cs.ImportKeysZip(zipReader.Reader)
+	err = cs.ImportKeysZip(zipReader.Reader, k.getRetriever())
 
 	if err != nil {
 		return fmt.Errorf("Error importing keys: %v", err)
@@ -353,7 +334,7 @@ func (k *keyCommander) keysImport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, false)
 	if err != nil {
 		return err
 	}
@@ -396,36 +377,33 @@ func (k *keyCommander) keysImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Must specify GUN for %s key", importRole)
 	}
 
-	cs := cryptoservice.NewCryptoService(k.keysImportGUN, ks...)
-	err = cs.ImportRoleKey(pemBytes, importRole, k.getRetriever())
+	// Root keys must be encrypted
+	if importRole == data.CanonicalRootRole {
+		if err = cryptoservice.CheckRootKeyIsEncrypted(pemBytes); err != nil {
+			return err
+		}
+	}
 
+	cs := cryptoservice.NewCryptoService(ks...)
+	// Convert to a data.PrivateKey, potentially decrypting the key
+	privKey, err := trustmanager.ParsePEMPrivateKey(pemBytes, "")
 	if err != nil {
-		return fmt.Errorf("Error importing root key: %v", err)
+		privKey, _, err = trustmanager.GetPasswdDecryptBytes(k.getRetriever(), pemBytes, "", "imported "+importRole)
+		if err != nil {
+			return err
+		}
+	}
+	err = cs.AddKey(importRole, k.keysImportGUN, privKey)
+	if err != nil {
+		return fmt.Errorf("Error importing key: %v", err)
 	}
 	return nil
 }
 
 func (k *keyCommander) keysRotate(cmd *cobra.Command, args []string) error {
-	if len(args) < 1 {
+	if len(args) < 2 {
 		cmd.Usage()
-		return fmt.Errorf("Must specify a GUN")
-	}
-	rotateKeyRole := strings.ToLower(k.rotateKeyRole)
-
-	var rolesToRotate []string
-	switch rotateKeyRole {
-	case "":
-		rolesToRotate = []string{data.CanonicalSnapshotRole, data.CanonicalTargetsRole}
-	case data.CanonicalSnapshotRole:
-		rolesToRotate = []string{data.CanonicalSnapshotRole}
-	case data.CanonicalTargetsRole:
-		rolesToRotate = []string{data.CanonicalTargetsRole}
-	default:
-		return fmt.Errorf("key rotation not supported for %s keys", k.rotateKeyRole)
-	}
-	if k.rotateKeyServerManaged && rotateKeyRole != data.CanonicalSnapshotRole {
-		return fmt.Errorf(
-			"remote signing/key management is only supported for the snapshot key")
+		return fmt.Errorf("Must specify a GUN and a key role to rotate")
 	}
 
 	config, err := k.configGetter()
@@ -434,27 +412,40 @@ func (k *keyCommander) keysRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	gun := args[0]
-	var rt http.RoundTripper
-	if k.rotateKeyServerManaged {
-		// this does not actually push the changes, just creates the keys, but
-		// it creates a key remotely so it needs a transport
-		rt, err = getTransport(config, gun, false)
-		if err != nil {
-			return err
-		}
-	}
-	nRepo, err := notaryclient.NewNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config),
-		rt, k.getRetriever())
+	rotateKeyRole := args[1]
+
+	rt, err := getTransport(config, gun, false)
 	if err != nil {
 		return err
 	}
-	for _, role := range rolesToRotate {
-		if err := nRepo.RotateKey(role, k.rotateKeyServerManaged); err != nil {
-			return err
+
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config),
+		rt, k.getRetriever(), trustPin)
+	if err != nil {
+		return err
+	}
+
+	if rotateKeyRole == data.CanonicalRootRole {
+		cmd.Print("Warning: you are about to rotate your root key.\n\n" +
+			"You must use your old key to sign this root rotation. We recommend that\n" +
+			"you sign all your future root changes with this key as well, so that\n" +
+			"clients can have a smoother update process. Please do not delete\n" +
+			"this key after rotating.\n\n" +
+			"Are you sure you want to proceed?  (yes/no)  ")
+
+		if !askConfirm(k.input) {
+			fmt.Fprintln(cmd.Out(), "\nAborting action.")
+			return nil
 		}
 	}
-	return nil
+
+	return nRepo.RotateKey(rotateKeyRole, k.rotateKeyServerManaged)
 }
 
 func removeKeyInteractively(keyStores []trustmanager.KeyStore, keyID string,
@@ -464,10 +455,10 @@ func removeKeyInteractively(keyStores []trustmanager.KeyStore, keyID string,
 	var storesByIndex []trustmanager.KeyStore
 
 	for _, store := range keyStores {
-		for keypath, role := range store.ListKeys() {
+		for keypath, keyInfo := range store.ListKeys() {
 			if filepath.Base(keypath) == keyID {
 				foundKeys = append(foundKeys,
-					[]string{keypath, role, store.Name()})
+					[]string{keypath, keyInfo.Role, store.Name()})
 				storesByIndex = append(storesByIndex, store)
 			}
 		}
@@ -477,8 +468,6 @@ func removeKeyInteractively(keyStores []trustmanager.KeyStore, keyID string,
 		return fmt.Errorf("No key with ID %s found.", keyID)
 	}
 
-	readIn := bufio.NewReader(in)
-
 	if len(foundKeys) > 1 {
 		for {
 			// ask the user for which key to delete
@@ -487,11 +476,11 @@ func removeKeyInteractively(keyStores []trustmanager.KeyStore, keyID string,
 				fmt.Fprintf(out, "\t%d. %s: %s (%s)\n", i+1, info[0], info[1], info[2])
 			}
 			fmt.Fprint(out, "Which would you like to delete?  Please enter a number:  ")
-			result, err := readIn.ReadBytes('\n')
-			if err != nil {
+			var result string
+			if _, err := fmt.Fscanln(in, &result); err != nil {
 				return err
 			}
-			index, err := strconv.Atoi(strings.TrimSpace(string(result)))
+			index, err := strconv.Atoi(strings.TrimSpace(result))
 
 			if err != nil || index > len(foundKeys) || index < 1 {
 				fmt.Fprintf(out, "\nInvalid choice: %s\n", string(result))
@@ -507,21 +496,14 @@ func removeKeyInteractively(keyStores []trustmanager.KeyStore, keyID string,
 	keyDescription := fmt.Sprintf("%s (role %s) from %s", foundKeys[0][0],
 		foundKeys[0][1], foundKeys[0][2])
 
-	fmt.Fprintf(out, "Are you sure you want to remove %s?  [Y/n]  ",
+	fmt.Fprintf(out, "Are you sure you want to remove %s?  (yes/no)  ",
 		keyDescription)
-	result, err := readIn.ReadBytes('\n')
-	if err != nil {
-		return err
-	}
-	yesno := strings.ToLower(strings.TrimSpace(string(result)))
-
-	if !strings.HasPrefix("yes", yesno) && yesno != "" {
+	if !askConfirm(in) {
 		fmt.Fprintln(out, "\nAborting action.")
 		return nil
 	}
 
-	err = storesByIndex[0].RemoveKey(foundKeys[0][0])
-	if err != nil {
+	if err := storesByIndex[0].RemoveKey(foundKeys[0][0]); err != nil {
 		return err
 	}
 
@@ -540,7 +522,7 @@ func (k *keyCommander) keyRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, false)
 	if err != nil {
 		return err
 	}
@@ -551,13 +533,12 @@ func (k *keyCommander) keyRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid key ID provided: %s", keyID)
 	}
 	cmd.Println("")
-	err = removeKeyInteractively(ks, keyID, os.Stdin,
-		cmd.Out())
+	err = removeKeyInteractively(ks, keyID, k.input, cmd.Out())
 	cmd.Println("")
 	return err
 }
 
-// keyPassphraseChange changes the passphrase for a root key's private key based on ID
+// keyPassphraseChange changes the passphrase for a private key based on ID
 func (k *keyCommander) keyPassphraseChange(cmd *cobra.Command, args []string) error {
 	if len(args) < 1 {
 		cmd.Usage()
@@ -568,7 +549,7 @@ func (k *keyCommander) keyPassphraseChange(cmd *cobra.Command, args []string) er
 	if err != nil {
 		return err
 	}
-	ks, err := k.getKeyStores(config, true)
+	ks, err := k.getKeyStores(config, true, false)
 	if err != nil {
 		return err
 	}
@@ -580,30 +561,43 @@ func (k *keyCommander) keyPassphraseChange(cmd *cobra.Command, args []string) er
 		return fmt.Errorf("invalid key ID provided: %s", keyID)
 	}
 
-	// Find the key's GUN by ID, in case it is a non-root key
-	var keyGUN string
-	for _, store := range ks {
-		for keypath := range store.ListKeys() {
-			if filepath.Base(keypath) == keyID {
-				keyGUN = filepath.Dir(keypath)
-			}
+	// Find which keyStore we should replace the key password in, and replace if we find it
+	var foundKeyStore trustmanager.KeyStore
+	var privKey data.PrivateKey
+	var keyInfo trustmanager.KeyInfo
+	var cs *cryptoservice.CryptoService
+	for _, keyStore := range ks {
+		cs = cryptoservice.NewCryptoService(keyStore)
+		if privKey, _, err = cs.GetPrivateKey(keyID); err == nil {
+			foundKeyStore = keyStore
+			break
 		}
 	}
-	cs := cryptoservice.NewCryptoService(keyGUN, ks...)
-	privKey, role, err := cs.GetPrivateKey(keyID)
-	if err != nil {
+	if foundKeyStore == nil {
 		return fmt.Errorf("could not retrieve local key for key ID provided: %s", keyID)
 	}
-
 	// Must use a different passphrase retriever to avoid caching the
 	// unlocking passphrase and reusing that.
 	passChangeRetriever := k.getRetriever()
-	keyStore, err := trustmanager.NewKeyFileStore(config.GetString("trust_dir"), passChangeRetriever)
-	err = keyStore.AddKey(filepath.Join(keyGUN, keyID), role, privKey)
+	var addingKeyStore trustmanager.KeyStore
+	switch foundKeyStore.Name() {
+	case "yubikey":
+		addingKeyStore, err = getYubiStore(nil, passChangeRetriever)
+		keyInfo = trustmanager.KeyInfo{Role: data.CanonicalRootRole}
+	default:
+		addingKeyStore, err = trustmanager.NewKeyFileStore(config.GetString("trust_dir"), passChangeRetriever)
+		if err != nil {
+			return err
+		}
+		keyInfo, err = foundKeyStore.GetKeyInfo(keyID)
+	}
 	if err != nil {
 		return err
 	}
-
+	err = addingKeyStore.AddKey(keyInfo, privKey)
+	if err != nil {
+		return err
+	}
 	cmd.Println("")
 	cmd.Printf("Successfully updated passphrase for key ID: %s", keyID)
 	cmd.Println("")
@@ -611,7 +605,7 @@ func (k *keyCommander) keyPassphraseChange(cmd *cobra.Command, args []string) er
 }
 
 func (k *keyCommander) getKeyStores(
-	config *viper.Viper, withHardware bool) ([]trustmanager.KeyStore, error) {
+	config *viper.Viper, withHardware, hardwareBackup bool) ([]trustmanager.KeyStore, error) {
 	retriever := k.getRetriever()
 
 	directory := config.GetString("trust_dir")
@@ -624,7 +618,12 @@ func (k *keyCommander) getKeyStores(
 	ks := []trustmanager.KeyStore{fileKeyStore}
 
 	if withHardware {
-		yubiStore, err := getYubiKeyStore(fileKeyStore, retriever)
+		var yubiStore trustmanager.KeyStore
+		if hardwareBackup {
+			yubiStore, err = getYubiStore(fileKeyStore, retriever)
+		} else {
+			yubiStore, err = getYubiStore(nil, retriever)
+		}
 		if err == nil && yubiStore != nil {
 			// Note that the order is important, since we want to prioritize
 			// the yubikey store

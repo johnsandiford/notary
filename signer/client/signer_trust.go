@@ -14,6 +14,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	pb "github.com/docker/notary/proto"
+	"github.com/docker/notary/signer/keys"
 	"github.com/docker/notary/tuf/data"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -128,7 +129,7 @@ func NewNotarySigner(hostname string, port string, tlsConfig *tls.Config) *Notar
 }
 
 // Create creates a remote key and returns the PublicKey associated with the remote private key
-func (trust *NotarySigner) Create(role, algorithm string) (data.PublicKey, error) {
+func (trust *NotarySigner) Create(role, gun, algorithm string) (data.PublicKey, error) {
 	publicKey, err := trust.kmClient.CreateKey(context.Background(), &pb.Algorithm{Algorithm: algorithm})
 	if err != nil {
 		return nil, err
@@ -137,13 +138,18 @@ func (trust *NotarySigner) Create(role, algorithm string) (data.PublicKey, error
 	return public, nil
 }
 
-// RemoveKey deletes a key
+// AddKey adds a key
+func (trust *NotarySigner) AddKey(role, gun string, k data.PrivateKey) error {
+	return errors.New("Adding a key to NotarySigner is not supported")
+}
+
+// RemoveKey deletes a key by ID - if the key didn't exist, succeed anyway
 func (trust *NotarySigner) RemoveKey(keyid string) error {
 	_, err := trust.kmClient.DeleteKey(context.Background(), &pb.KeyID{ID: keyid})
 	return err
 }
 
-// GetKey retrieves a key
+// GetKey retrieves a key by ID - returns nil if the key doesn't exist
 func (trust *NotarySigner) GetKey(keyid string) data.PublicKey {
 	publicKey, err := trust.kmClient.GetKeyInfo(context.Background(), &pb.KeyID{ID: keyid})
 	if err != nil {
@@ -152,11 +158,12 @@ func (trust *NotarySigner) GetKey(keyid string) data.PublicKey {
 	return data.NewPublicKey(publicKey.KeyInfo.Algorithm.Algorithm, publicKey.PublicKey)
 }
 
-// GetPrivateKey errors in all cases
+// GetPrivateKey retrieves by ID an object that can be used to sign, but that does
+// not contain any private bytes.  If the key doesn't exist, returns an error.
 func (trust *NotarySigner) GetPrivateKey(keyid string) (data.PrivateKey, string, error) {
 	pubKey := trust.GetKey(keyid)
 	if pubKey == nil {
-		return nil, "", nil
+		return nil, "", keys.ErrInvalidKeyID
 	}
 	return NewRemotePrivateKey(pubKey, trust.sClient), "", nil
 }
@@ -196,10 +203,4 @@ func (trust *NotarySigner) CheckHealth(timeout time.Duration) error {
 	}
 
 	return err
-}
-
-// ImportRootKey satisfies the CryptoService interface. It should not be implemented
-// for a NotarySigner.
-func (trust *NotarySigner) ImportRootKey(r io.Reader) error {
-	return errors.New("Importing a root key to NotarySigner is not supported")
 }

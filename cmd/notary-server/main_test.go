@@ -11,13 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/notary"
 	"github.com/docker/notary/server/storage"
 	"github.com/docker/notary/signer/client"
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/tuf/signed"
 	"github.com/docker/notary/utils"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/spf13/viper"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -43,7 +45,7 @@ func TestGetAddrAndTLSConfigInvalidTLS(t *testing.T) {
 	}
 	for _, configJSON := range invalids {
 		_, _, err := getAddrAndTLSConfig(configure(configJSON))
-		assert.Error(t, err)
+		require.Error(t, err)
 	}
 }
 
@@ -54,8 +56,8 @@ func TestGetAddrAndTLSConfigNoHTTPAddr(t *testing.T) {
 			"tls_key_file": "%s"
 		}
 	}`, Cert, Key)))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "http listen address required for server")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "http listen address required for server")
 }
 
 func TestGetAddrAndTLSConfigSuccessWithTLS(t *testing.T) {
@@ -66,17 +68,17 @@ func TestGetAddrAndTLSConfigSuccessWithTLS(t *testing.T) {
 			"tls_key_file": "%s"
 		}
 	}`, Cert, Key)))
-	assert.NoError(t, err)
-	assert.Equal(t, ":2345", httpAddr)
-	assert.NotNil(t, tlsConf)
+	require.NoError(t, err)
+	require.Equal(t, ":2345", httpAddr)
+	require.NotNil(t, tlsConf)
 }
 
 func TestGetAddrAndTLSConfigSuccessWithoutTLS(t *testing.T) {
 	httpAddr, tlsConf, err := getAddrAndTLSConfig(configure(
 		`{"server": {"http_addr": ":2345"}}`))
-	assert.NoError(t, err)
-	assert.Equal(t, ":2345", httpAddr)
-	assert.Nil(t, tlsConf)
+	require.NoError(t, err)
+	require.Equal(t, ":2345", httpAddr)
+	require.Nil(t, tlsConf)
 }
 
 func TestGetAddrAndTLSConfigWithClientTLS(t *testing.T) {
@@ -88,9 +90,9 @@ func TestGetAddrAndTLSConfigWithClientTLS(t *testing.T) {
 			"client_ca_file": "%s"
 		}
 	}`, Cert, Key, Root)))
-	assert.NoError(t, err)
-	assert.Equal(t, ":2345", httpAddr)
-	assert.NotNil(t, tlsConf.ClientCAs)
+	require.NoError(t, err)
+	require.Equal(t, ":2345", httpAddr)
+	require.NotNil(t, tlsConf.ClientCAs)
 }
 
 // If neither "remote" nor "local" is passed for "trust_service.type", an
@@ -108,12 +110,12 @@ func TestGetInvalidTrustService(t *testing.T) {
 	for _, config := range invalids {
 		_, _, err := getTrustService(configure(config),
 			client.NewNotarySigner, fakeRegister)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(),
+		require.Error(t, err)
+		require.Contains(t, err.Error(),
 			"must specify either a \"local\" or \"remote\" type for trust_service")
 	}
 	// no health function ever registered
-	assert.Equal(t, 0, registerCalled)
+	require.Equal(t, 0, registerCalled)
 }
 
 // If a local trust service is specified, a local trust service will be used
@@ -129,12 +131,12 @@ func TestGetLocalTrustService(t *testing.T) {
 
 	trust, algo, err := getTrustService(configure(localConfig),
 		client.NewNotarySigner, fakeRegister)
-	assert.NoError(t, err)
-	assert.IsType(t, &signed.Ed25519{}, trust)
-	assert.Equal(t, data.ED25519Key, algo)
+	require.NoError(t, err)
+	require.IsType(t, &signed.Ed25519{}, trust)
+	require.Equal(t, data.ED25519Key, algo)
 
 	// no health function ever registered
-	assert.Equal(t, 0, registerCalled)
+	require.Equal(t, 0, registerCalled)
 }
 
 // Invalid key algorithms result in an error if a remote trust service was
@@ -162,11 +164,11 @@ func TestGetTrustServiceInvalidKeyAlgorithm(t *testing.T) {
 	for _, config := range badKeyAlgos {
 		_, _, err := getTrustService(configure(config),
 			client.NewNotarySigner, fakeRegister)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid key algorithm")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid key algorithm")
 	}
 	// no health function ever registered
-	assert.Equal(t, 0, registerCalled)
+	require.Equal(t, 0, registerCalled)
 }
 
 // template to be used for testing TLS parsing with the trust service
@@ -198,12 +200,12 @@ func TestGetTrustServiceTLSMissingCertOrKey(t *testing.T) {
 		config := configure(jsonConfig)
 		_, _, err := getTrustService(config, client.NewNotarySigner,
 			fakeRegister)
-		assert.Error(t, err)
-		assert.True(t,
+		require.Error(t, err)
+		require.True(t,
 			strings.Contains(err.Error(), "either pass both client key and cert, or neither"))
 	}
 	// no health function ever registered
-	assert.Equal(t, 0, registerCalled)
+	require.Equal(t, 0, registerCalled)
 }
 
 // If no TLS configuration is provided for the host server, no TLS config will
@@ -230,13 +232,13 @@ func TestGetTrustServiceNoTLSConfig(t *testing.T) {
 
 	trust, algo, err := getTrustService(configure(config),
 		fakeNewSigner, fakeRegister)
-	assert.NoError(t, err)
-	assert.IsType(t, &client.NotarySigner{}, trust)
-	assert.Equal(t, "ecdsa", algo)
-	assert.Nil(t, tlsConfig.RootCAs)
-	assert.Nil(t, tlsConfig.Certificates)
+	require.NoError(t, err)
+	require.IsType(t, &client.NotarySigner{}, trust)
+	require.Equal(t, "ecdsa", algo)
+	require.Nil(t, tlsConfig.RootCAs)
+	require.Nil(t, tlsConfig.Certificates)
 	// health function registered
-	assert.Equal(t, 1, registerCalled)
+	require.Equal(t, 1, registerCalled)
 }
 
 // The rest of the functionality of getTrustService depends upon
@@ -244,7 +246,7 @@ func TestGetTrustServiceNoTLSConfig(t *testing.T) {
 // the correct tls.Config is returned based on all the configuration parameters
 func TestGetTrustServiceTLSSuccess(t *testing.T) {
 	keypair, err := tls.LoadX509KeyPair(Cert, Key)
-	assert.NoError(t, err, "Unable to load cert and key for testing")
+	require.NoError(t, err, "Unable to load cert and key for testing")
 
 	tlspart := fmt.Sprintf(`"tls_client_cert": "%s", "tls_client_key": "%s"`,
 		Cert, Key)
@@ -263,13 +265,13 @@ func TestGetTrustServiceTLSSuccess(t *testing.T) {
 	trust, algo, err := getTrustService(
 		configure(fmt.Sprintf(trustTLSConfigTemplate, tlspart)),
 		fakeNewSigner, fakeRegister)
-	assert.NoError(t, err)
-	assert.IsType(t, &client.NotarySigner{}, trust)
-	assert.Equal(t, "ecdsa", algo)
-	assert.Len(t, tlsConfig.Certificates, 1)
-	assert.True(t, reflect.DeepEqual(keypair, tlsConfig.Certificates[0]))
+	require.NoError(t, err)
+	require.IsType(t, &client.NotarySigner{}, trust)
+	require.Equal(t, "ecdsa", algo)
+	require.Len(t, tlsConfig.Certificates, 1)
+	require.True(t, reflect.DeepEqual(keypair, tlsConfig.Certificates[0]))
 	// health function registered
-	assert.Equal(t, 1, registerCalled)
+	require.Equal(t, 1, registerCalled)
 }
 
 // The rest of the functionality of getTrustService depends upon
@@ -288,42 +290,128 @@ func TestGetTrustServiceTLSFailure(t *testing.T) {
 		configure(fmt.Sprintf(trustTLSConfigTemplate, tlspart)),
 		client.NewNotarySigner, fakeRegister)
 
-	assert.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(),
+	require.Error(t, err)
+	require.True(t, strings.Contains(err.Error(),
 		"Unable to configure TLS to the trust service"))
 
 	// no health function ever registered
-	assert.Equal(t, 0, registerCalled)
+	require.Equal(t, 0, registerCalled)
 }
 
 // Just to ensure that errors are propagated
 func TestGetStoreInvalid(t *testing.T) {
 	config := `{"storage": {"backend": "asdf", "db_url": "/tmp/1234"}}`
 
-	_, err := getStore(configure(config), []string{"mysql"})
-	assert.Error(t, err)
+	var registerCalled = 0
+	var fakeRegister = func(_ string, _ func() error, _ time.Duration) {
+		registerCalled++
+	}
+
+	_, err := getStore(configure(config), fakeRegister)
+	require.Error(t, err)
+
+	// no health function ever registered
+	require.Equal(t, 0, registerCalled)
 }
 
 func TestGetStoreDBStore(t *testing.T) {
 	tmpFile, err := ioutil.TempFile("/tmp", "sqlite3")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
 	config := fmt.Sprintf(`{"storage": {"backend": "%s", "db_url": "%s"}}`,
-		utils.SqliteBackend, tmpFile.Name())
+		notary.SQLiteBackend, tmpFile.Name())
 
-	store, err := getStore(configure(config), []string{utils.SqliteBackend})
-	assert.NoError(t, err)
-	_, ok := store.(*storage.SQLStorage)
-	assert.True(t, ok)
+	var registerCalled = 0
+	var fakeRegister = func(_ string, _ func() error, _ time.Duration) {
+		registerCalled++
+	}
+
+	store, err := getStore(configure(config), fakeRegister)
+	require.NoError(t, err)
+	_, ok := store.(storage.TUFMetaStorage)
+	require.True(t, ok)
+
+	// health function registered
+	require.Equal(t, 1, registerCalled)
+}
+
+func TestGetStoreRethinkDBStoreConnectionFails(t *testing.T) {
+	config := fmt.Sprintf(
+		`{"storage": {
+			"backend": "%s",
+			"db_url": "host:port",
+			"tls_ca_file": "/tls/ca.pem",
+			"client_cert_file": "/tls/cert.pem",
+			"client_key_file": "/tls/key.pem",
+			"database": "rethinkdbtest"
+			}
+		}`,
+		notary.RethinkDBBackend)
+
+	var registerCalled = 0
+	var fakeRegister = func(_ string, _ func() error, _ time.Duration) {
+		registerCalled++
+	}
+
+	_, err := getStore(configure(config), fakeRegister)
+	require.Error(t, err)
 }
 
 func TestGetMemoryStore(t *testing.T) {
-	config := fmt.Sprintf(`{"storage": {"backend": "%s"}}`, utils.MemoryBackend)
-	store, err := getStore(configure(config),
-		[]string{utils.MySQLBackend, utils.MemoryBackend})
-	assert.NoError(t, err)
+	var registerCalled = 0
+	var fakeRegister = func(_ string, _ func() error, _ time.Duration) {
+		registerCalled++
+	}
+
+	config := fmt.Sprintf(`{"storage": {"backend": "%s"}}`, notary.MemoryBackend)
+	store, err := getStore(configure(config), fakeRegister)
+	require.NoError(t, err)
 	_, ok := store.(*storage.MemStorage)
-	assert.True(t, ok)
+	require.True(t, ok)
+
+	// no health function ever registered
+	require.Equal(t, 0, registerCalled)
+}
+
+func TestGetCacheConfig(t *testing.T) {
+	defaults := `{}`
+	valid := `{"caching": {"max_age": {"current_metadata": 0, "consistent_metadata": 31536000}}}`
+	invalids := []string{
+		`{"caching": {"max_age": {"current_metadata": 0, "consistent_metadata": 31539000}}}`,
+		`{"caching": {"max_age": {"current_metadata": -1, "consistent_metadata": 300}}}`,
+		`{"caching": {"max_age": {"current_metadata": "hello", "consistent_metadata": 300}}}`,
+	}
+
+	current, consistent, err := getCacheConfig(configure(defaults))
+	require.NoError(t, err)
+	require.Equal(t,
+		utils.PublicCacheControl{MaxAgeInSeconds: int(notary.CurrentMetadataCacheMaxAge.Seconds()),
+			MustReValidate: true}, current)
+	require.Equal(t,
+		utils.PublicCacheControl{MaxAgeInSeconds: int(notary.ConsistentMetadataCacheMaxAge.Seconds())}, consistent)
+
+	current, consistent, err = getCacheConfig(configure(valid))
+	require.NoError(t, err)
+	require.Equal(t, utils.NoCacheControl{}, current)
+	require.Equal(t, utils.PublicCacheControl{MaxAgeInSeconds: 31536000}, consistent)
+
+	for _, invalid := range invalids {
+		_, _, err := getCacheConfig(configure(invalid))
+		require.Error(t, err)
+	}
+}
+
+// For sanity, make sure we can always parse the sample config
+func TestSampleConfig(t *testing.T) {
+	var registerCalled = 0
+	var fakeRegister = func(_ string, _ func() error, _ time.Duration) {
+		registerCalled++
+	}
+	_, _, err := parseServerConfig("../../fixtures/server-config.json", fakeRegister)
+	require.NoError(t, err)
+
+	// once for the DB, once for the trust service
+	require.Equal(t, registerCalled, 2)
 }

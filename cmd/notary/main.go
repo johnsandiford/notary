@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,7 @@ func (n *notaryCommander) GetCommand() *cobra.Command {
 	notaryCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print the version number of notary",
-		Long:  `print the version number of notary`,
+		Long:  "Print the version number of notary",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("notary\n Version:    %s\n Git commit: %s\n", version.NotaryVersion, version.GitCommit)
 		},
@@ -170,14 +171,10 @@ func (n *notaryCommander) GetCommand() *cobra.Command {
 	cmdKeyGenerator := &keyCommander{
 		configGetter: n.parseConfig,
 		getRetriever: n.getRetriever,
+		input:        os.Stdin,
 	}
 
 	cmdDelegationGenerator := &delegationCommander{
-		configGetter: n.parseConfig,
-		retriever:    n.getRetriever(),
-	}
-
-	cmdCertGenerator := &certCommander{
 		configGetter: n.parseConfig,
 		retriever:    n.getRetriever(),
 	}
@@ -189,7 +186,6 @@ func (n *notaryCommander) GetCommand() *cobra.Command {
 
 	notaryCmd.AddCommand(cmdKeyGenerator.GetCommand())
 	notaryCmd.AddCommand(cmdDelegationGenerator.GetCommand())
-	notaryCmd.AddCommand(cmdCertGenerator.GetCommand())
 
 	cmdTufGenerator.AddToCommand(&notaryCmd)
 
@@ -210,10 +206,9 @@ func fatalf(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
-func askConfirm() bool {
+func askConfirm(input io.Reader) bool {
 	var res string
-	_, err := fmt.Scanln(&res)
-	if err != nil {
+	if _, err := fmt.Fscanln(input, &res); err != nil {
 		return false
 	}
 	if strings.EqualFold(res, "y") || strings.EqualFold(res, "yes") {
@@ -225,13 +220,20 @@ func askConfirm() bool {
 func getPassphraseRetriever() passphrase.Retriever {
 	baseRetriever := passphrase.PromptRetriever()
 	env := map[string]string{
-		"root":     os.Getenv("NOTARY_ROOT_PASSPHRASE"),
-		"targets":  os.Getenv("NOTARY_TARGETS_PASSPHRASE"),
-		"snapshot": os.Getenv("NOTARY_SNAPSHOT_PASSPHRASE"),
+		"root":       os.Getenv("NOTARY_ROOT_PASSPHRASE"),
+		"targets":    os.Getenv("NOTARY_TARGETS_PASSPHRASE"),
+		"snapshot":   os.Getenv("NOTARY_SNAPSHOT_PASSPHRASE"),
+		"delegation": os.Getenv("NOTARY_DELEGATION_PASSPHRASE"),
 	}
 
 	return func(keyName string, alias string, createNew bool, numAttempts int) (string, bool, error) {
 		if v := env[alias]; v != "" {
+			return v, numAttempts > 1, nil
+		}
+		// For delegation roles, we can also try the "delegation" alias if it is specified
+		// Note that we don't check if the role name is for a delegation to allow for names like "user"
+		// since delegation keys can be shared across repositories
+		if v := env["delegation"]; v != "" {
 			return v, numAttempts > 1, nil
 		}
 		return baseRetriever(keyName, alias, createNew, numAttempts)

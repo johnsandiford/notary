@@ -6,6 +6,7 @@ import (
 	"crypto/sha512"
 	rjson "encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,8 @@ import (
 func validTimestampTemplate() *SignedTimestamp {
 	return &SignedTimestamp{
 		Signed: Timestamp{
-			Type: "Timestamp", Version: 1, Expires: time.Now(), Meta: Files{
+			SignedCommon: SignedCommon{Type: TUFTypes[CanonicalTimestampRole], Version: 1, Expires: time.Now()},
+			Meta: Files{
 				CanonicalSnapshotRole: FileMeta{Hashes: Hashes{"sha256": bytes.Repeat([]byte("a"), sha256.Size)}},
 			}},
 		Signatures: []Signature{
@@ -26,7 +28,8 @@ func validTimestampTemplate() *SignedTimestamp {
 }
 
 func TestTimestampToSignedMarshalsSignedPortionWithCanonicalJSON(t *testing.T) {
-	ts := SignedTimestamp{Signed: Timestamp{Type: "Timestamp", Version: 1, Expires: time.Now()}}
+	ts := SignedTimestamp{Signed: Timestamp{
+		SignedCommon: SignedCommon{Type: TUFTypes[CanonicalTimestampRole], Version: 1, Expires: time.Now()}}}
 	signedCanonical, err := ts.ToSigned()
 	require.NoError(t, err)
 
@@ -37,13 +40,14 @@ func TestTimestampToSignedMarshalsSignedPortionWithCanonicalJSON(t *testing.T) {
 
 	// don't bother testing regular JSON because it might not be different
 
-	require.True(t, bytes.Equal(signedCanonical.Signed, castedCanonical),
+	require.True(t, bytes.Equal(*signedCanonical.Signed, castedCanonical),
 		"expected %v == %v", signedCanonical.Signed, castedCanonical)
 }
 
 func TestTimestampToSignCopiesSignatures(t *testing.T) {
 	ts := SignedTimestamp{
-		Signed: Timestamp{Type: "Timestamp", Version: 2, Expires: time.Now()},
+		Signed: Timestamp{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalTimestampRole], Version: 2, Expires: time.Now()}},
 		Signatures: []Signature{
 			{KeyID: "key1", Method: "method1", Signature: []byte("hello")},
 		},
@@ -63,7 +67,8 @@ func TestTimestampToSignedMarshallingErrorsPropagated(t *testing.T) {
 	setDefaultSerializer(errorSerializer{})
 	defer setDefaultSerializer(canonicalJSON{})
 	ts := SignedTimestamp{
-		Signed: Timestamp{Type: "Timestamp", Version: 2, Expires: time.Now()},
+		Signed: Timestamp{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalTimestampRole], Version: 2, Expires: time.Now()}},
 	}
 	_, err := ts.ToSigned()
 	require.EqualError(t, err, "bad")
@@ -71,7 +76,8 @@ func TestTimestampToSignedMarshallingErrorsPropagated(t *testing.T) {
 
 func TestTimestampMarshalJSONMarshalsSignedWithRegularJSON(t *testing.T) {
 	ts := SignedTimestamp{
-		Signed: Timestamp{Type: "Timestamp", Version: 1, Expires: time.Now()},
+		Signed: Timestamp{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalTimestampRole], Version: 1, Expires: time.Now()}},
 		Signatures: []Signature{
 			{KeyID: "key1", Method: "method1", Signature: []byte("hello")},
 			{KeyID: "key2", Method: "method2", Signature: []byte("there")},
@@ -96,7 +102,8 @@ func TestTimestampMarshalJSONMarshallingErrorsPropagated(t *testing.T) {
 	setDefaultSerializer(errorSerializer{})
 	defer setDefaultSerializer(canonicalJSON{})
 	ts := SignedTimestamp{
-		Signed: Timestamp{Type: "Timestamp", Version: 2, Expires: time.Now()},
+		Signed: Timestamp{SignedCommon: SignedCommon{
+			Type: TUFTypes[CanonicalTimestampRole], Version: 2, Expires: time.Now()}},
 	}
 	_, err := ts.MarshalJSON()
 	require.EqualError(t, err, "bad")
@@ -170,8 +177,9 @@ func TestTimestampFromSignedValidatesMeta(t *testing.T) {
 // Type must be "Timestamp"
 func TestTimestampFromSignedValidatesRoleType(t *testing.T) {
 	ts := validTimestampTemplate()
+	tsType := TUFTypes[CanonicalTimestampRole]
 
-	for _, invalid := range []string{" Timestamp", CanonicalSnapshotRole, "TIMESTAMP"} {
+	for _, invalid := range []string{" " + tsType, CanonicalSnapshotRole, strings.ToUpper(tsType)} {
 		ts.Signed.Type = invalid
 		s, err := ts.ToSigned()
 		require.NoError(t, err)
@@ -180,10 +188,26 @@ func TestTimestampFromSignedValidatesRoleType(t *testing.T) {
 	}
 
 	ts = validTimestampTemplate()
-	ts.Signed.Type = "Timestamp"
+	ts.Signed.Type = tsType
 	sTimestamp, err := timestampToSignedAndBack(t, ts)
 	require.NoError(t, err)
-	require.Equal(t, "Timestamp", sTimestamp.Signed.Type)
+	require.Equal(t, tsType, sTimestamp.Signed.Type)
+}
+
+// The version cannot be negative
+func TestTimestampFromSignedValidatesVersion(t *testing.T) {
+	ts := validTimestampTemplate()
+	ts.Signed.Version = -1
+	_, err := timestampToSignedAndBack(t, ts)
+	require.IsType(t, ErrInvalidMetadata{}, err)
+
+	ts.Signed.Version = 0
+	_, err = timestampToSignedAndBack(t, ts)
+	require.IsType(t, ErrInvalidMetadata{}, err)
+
+	ts.Signed.Version = 1
+	_, err = timestampToSignedAndBack(t, ts)
+	require.NoError(t, err)
 }
 
 // GetSnapshot returns the snapshot checksum, or an error if it is missing.

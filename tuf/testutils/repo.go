@@ -1,8 +1,10 @@
 package testutils
 
 import (
+	"fmt"
 	"math/rand"
 	"sort"
+	"testing"
 	"time"
 
 	"github.com/docker/go/canonical/json"
@@ -12,13 +14,16 @@ import (
 	"github.com/docker/notary/tuf/data"
 	"github.com/docker/notary/tuf/utils"
 	fuzz "github.com/google/gofuzz"
+	"github.com/stretchr/testify/require"
 
 	tuf "github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/signed"
 )
 
-func createKey(cs signed.CryptoService, gun, role string) (data.PublicKey, error) {
-	key, err := cs.Create(role, data.ECDSAKey)
+// CreateKey creates a new key inside the cryptoservice for the given role and gun,
+// returning the public key.  If the role is a root role, create an x509 key.
+func CreateKey(cs signed.CryptoService, gun, role, keyAlgorithm string) (data.PublicKey, error) {
+	key, err := cs.Create(role, gun, keyAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -34,22 +39,44 @@ func createKey(cs signed.CryptoService, gun, role string) (data.PublicKey, error
 		if err != nil {
 			return nil, err
 		}
-		key = data.NewECDSAx509PublicKey(trustmanager.CertToPEM(cert))
+		// Keep the x509 key type consistent with the key's algorithm
+		switch keyAlgorithm {
+		case data.RSAKey:
+			key = data.NewRSAx509PublicKey(trustmanager.CertToPEM(cert))
+		case data.ECDSAKey:
+			key = data.NewECDSAx509PublicKey(trustmanager.CertToPEM(cert))
+		default:
+			// This should be impossible because of the Create() call above, but just in case
+			return nil, fmt.Errorf("invalid key algorithm type")
+		}
+
 	}
 	return key, nil
+}
+
+// CopyKeys copies keys of a particular role to a new cryptoservice, and returns that cryptoservice
+func CopyKeys(t *testing.T, from signed.CryptoService, roles ...string) signed.CryptoService {
+	memKeyStore := trustmanager.NewKeyMemoryStore(passphrase.ConstantRetriever("pass"))
+	for _, role := range roles {
+		for _, keyID := range from.ListKeys(role) {
+			key, _, err := from.GetPrivateKey(keyID)
+			require.NoError(t, err)
+			memKeyStore.AddKey(trustmanager.KeyInfo{Role: role}, key)
+		}
+	}
+	return cryptoservice.NewCryptoService(memKeyStore)
 }
 
 // EmptyRepo creates an in memory crypto service
 // and initializes a repo with no targets.  Delegations are only created
 // if delegation roles are passed in.
 func EmptyRepo(gun string, delegationRoles ...string) (*tuf.Repo, signed.CryptoService, error) {
-	cs := cryptoservice.NewCryptoService(
-		gun, trustmanager.NewKeyMemoryStore(passphrase.ConstantRetriever("")))
+	cs := cryptoservice.NewCryptoService(trustmanager.NewKeyMemoryStore(passphrase.ConstantRetriever("")))
 	r := tuf.NewRepo(cs)
 
 	baseRoles := map[string]data.BaseRole{}
 	for _, role := range data.BaseRoles {
-		key, err := createKey(cs, gun, role)
+		key, err := CreateKey(cs, gun, role, data.ECDSAKey)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -76,7 +103,7 @@ func EmptyRepo(gun string, delegationRoles ...string) (*tuf.Repo, signed.CryptoS
 	sort.Strings(delegationRoles)
 	for _, delgName := range delegationRoles {
 		// create a delegations key and a delegation in the tuf repo
-		delgKey, err := createKey(cs, gun, delgName)
+		delgKey, err := CreateKey(cs, gun, delgName, data.ECDSAKey)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -98,40 +125,10 @@ func NewRepoMetadata(gun string, delegationRoles ...string) (map[string][]byte, 
 		return nil, nil, err
 	}
 
-	meta := make(map[string][]byte)
-
-	for _, delgName := range delegationRoles {
-		// is there metadata yet?  if empty, it may not be created
-		if _, ok := tufRepo.Targets[delgName]; ok {
-			signedThing, err := tufRepo.SignTargets(delgName, data.DefaultExpires("targets"))
-			if err != nil {
-				return nil, nil, err
-			}
-			metaBytes, err := json.MarshalCanonical(signedThing)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			meta[delgName] = metaBytes
-		}
-	}
-
-	// these need to be generated after the delegations are created and signed so
-	// the snapshot will have the delegation metadata
-	rs, tgs, ss, ts, err := Sign(tufRepo)
+	meta, err := SignAndSerialize(tufRepo)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	rf, tgf, sf, tf, err := Serialize(rs, tgs, ss, ts)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	meta[data.CanonicalRootRole] = rf
-	meta[data.CanonicalSnapshotRole] = sf
-	meta[data.CanonicalTargetsRole] = tgf
-	meta[data.CanonicalTimestampRole] = tf
 
 	return meta, cs, nil
 }
@@ -171,6 +168,48 @@ func RandomByteSlice(maxSize int) []byte {
 		content[i] = byte(r.Int63() & 0xff)
 	}
 	return content
+}
+
+// SignAndSerialize calls Sign and then Serialize to get the repo metadata out
+func SignAndSerialize(tufRepo *tuf.Repo) (map[string][]byte, error) {
+	meta := make(map[string][]byte)
+
+	for delgName := range tufRepo.Targets {
+		// we'll sign targets later
+		if delgName == data.CanonicalTargetsRole {
+			continue
+		}
+
+		signedThing, err := tufRepo.SignTargets(delgName, data.DefaultExpires("targets"))
+		if err != nil {
+			return nil, err
+		}
+		metaBytes, err := json.MarshalCanonical(signedThing)
+		if err != nil {
+			return nil, err
+		}
+
+		meta[delgName] = metaBytes
+	}
+
+	// these need to be generated after the delegations are created and signed so
+	// the snapshot will have the delegation metadata
+	rs, tgs, ss, ts, err := Sign(tufRepo)
+	if err != nil {
+		return nil, err
+	}
+
+	rf, tgf, sf, tf, err := Serialize(rs, tgs, ss, ts)
+	if err != nil {
+		return nil, err
+	}
+
+	meta[data.CanonicalRootRole] = rf
+	meta[data.CanonicalSnapshotRole] = sf
+	meta[data.CanonicalTargetsRole] = tgf
+	meta[data.CanonicalTimestampRole] = tf
+
+	return meta, nil
 }
 
 // Sign signs all top level roles in a repo in the appropriate order

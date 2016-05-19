@@ -43,7 +43,7 @@ func TestTargetsToSignedMarshalsSignedPortionWithCanonicalJSON(t *testing.T) {
 
 	// don't bother testing regular JSON because it might not be different
 
-	require.True(t, bytes.Equal(signedCanonical.Signed, castedCanonical),
+	require.True(t, bytes.Equal(*signedCanonical.Signed, castedCanonical),
 		"expected %v == %v", signedCanonical.Signed, castedCanonical)
 }
 
@@ -226,4 +226,26 @@ func TestTargetsFromSignedValidatesRoleName(t *testing.T) {
 		_, err = TargetsFromSigned(s, roleName)
 		require.IsType(t, ErrInvalidRole{}, err)
 	}
+}
+
+// The version cannot be negative
+func TestTargetsFromSignedValidatesVersion(t *testing.T) {
+	tg := validTargetsTemplate()
+	tg.Signed.Version = -1
+	s, err := tg.ToSigned()
+	require.NoError(t, err)
+	_, err = TargetsFromSigned(s, "targets/a")
+	require.IsType(t, ErrInvalidMetadata{}, err)
+
+	tg.Signed.Version = 0
+	s, err = tg.ToSigned()
+	require.NoError(t, err)
+	_, err = TargetsFromSigned(s, "targets/a")
+	require.IsType(t, ErrInvalidMetadata{}, err)
+
+	tg.Signed.Version = 1
+	s, err = tg.ToSigned()
+	require.NoError(t, err)
+	_, err = TargetsFromSigned(s, "targets/a")
+	require.NoError(t, err)
 }

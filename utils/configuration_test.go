@@ -11,9 +11,10 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/bugsnag/bugsnag-go"
+	"github.com/docker/notary"
 	"github.com/docker/notary/trustmanager"
 	"github.com/spf13/viper"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const envPrefix = "NOTARY_TESTING_ENV_PREFIX"
@@ -37,7 +38,7 @@ func configure(jsonConfig string) *viper.Viper {
 func setupEnvironmentVariables(t *testing.T, vars map[string]string) {
 	for k, v := range vars {
 		err := os.Setenv(fmt.Sprintf("%s_%s", envPrefix, k), v)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 }
 
@@ -45,7 +46,7 @@ func setupEnvironmentVariables(t *testing.T, vars map[string]string) {
 func cleanupEnvironmentVariables(t *testing.T, vars map[string]string) {
 	for k := range vars {
 		err := os.Unsetenv(fmt.Sprintf("%s_%s", envPrefix, k))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 }
@@ -54,8 +55,8 @@ func cleanupEnvironmentVariables(t *testing.T, vars map[string]string) {
 func TestParseInvalidLogLevel(t *testing.T) {
 	_, err := ParseLogLevel(configure(`{"logging": {"level": "horatio"}}`),
 		logrus.DebugLevel)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not a valid logrus Level")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a valid logrus Level")
 }
 
 // If there is no logging level configured it is set to the default level
@@ -63,8 +64,8 @@ func TestParseNoLogLevel(t *testing.T) {
 	empties := []string{`{}`, `{"logging": {}}`}
 	for _, configJSON := range empties {
 		lvl, err := ParseLogLevel(configure(configJSON), logrus.DebugLevel)
-		assert.NoError(t, err)
-		assert.Equal(t, logrus.DebugLevel, lvl)
+		require.NoError(t, err)
+		require.Equal(t, logrus.DebugLevel, lvl)
 	}
 }
 
@@ -72,8 +73,8 @@ func TestParseNoLogLevel(t *testing.T) {
 func TestParseLogLevel(t *testing.T) {
 	lvl, err := ParseLogLevel(configure(`{"logging": {"level": "error"}}`),
 		logrus.DebugLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, logrus.ErrorLevel, lvl)
+	require.NoError(t, err)
+	require.Equal(t, logrus.ErrorLevel, lvl)
 }
 
 func TestParseLogLevelWithEnvironmentVariables(t *testing.T) {
@@ -83,16 +84,16 @@ func TestParseLogLevelWithEnvironmentVariables(t *testing.T) {
 
 	lvl, err := ParseLogLevel(configure(`{}`),
 		logrus.DebugLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, logrus.ErrorLevel, lvl)
+	require.NoError(t, err)
+	require.Equal(t, logrus.ErrorLevel, lvl)
 }
 
 // An error is returned if there's no API key
 func TestParseInvalidBugsnag(t *testing.T) {
 	_, err := ParseBugsnag(configure(
 		`{"reporting": {"bugsnag": {"endpoint": "http://12345"}}}`))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must provide an API key")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must provide an API key")
 }
 
 // If there's no bugsnag, a nil pointer is returned
@@ -100,8 +101,8 @@ func TestParseNoBugsnag(t *testing.T) {
 	empties := []string{`{}`, `{"reporting": {}}`}
 	for _, configJSON := range empties {
 		bugconf, err := ParseBugsnag(configure(configJSON))
-		assert.NoError(t, err)
-		assert.Nil(t, bugconf)
+		require.NoError(t, err)
+		require.Nil(t, bugconf)
 	}
 }
 
@@ -123,8 +124,8 @@ func TestParseBugsnag(t *testing.T) {
 	}
 
 	bugconf, err := ParseBugsnag(config)
-	assert.NoError(t, err)
-	assert.Equal(t, expected, *bugconf)
+	require.NoError(t, err)
+	require.Equal(t, expected, *bugconf)
 }
 
 func TestParseBugsnagWithEnvironmentVariables(t *testing.T) {
@@ -151,8 +152,8 @@ func TestParseBugsnagWithEnvironmentVariables(t *testing.T) {
 	}
 
 	bugconf, err := ParseBugsnag(config)
-	assert.NoError(t, err)
-	assert.Equal(t, expected, *bugconf)
+	require.NoError(t, err)
+	require.Equal(t, expected, *bugconf)
 }
 
 // If the storage backend is invalid or not provided, an error is returned.
@@ -164,48 +165,35 @@ func TestParseInvalidStorageBackend(t *testing.T) {
 		`{}`,
 	}
 	for _, configJSON := range invalids {
-		_, err := ParseStorage(configure(configJSON),
-			[]string{MySQLBackend, SqliteBackend})
-		assert.Error(t, err, fmt.Sprintf("'%s' should be an error", configJSON))
-		assert.Contains(t, err.Error(),
-			"must specify one of these supported backends: mysql, sqlite3")
+		_, err := ParseSQLStorage(configure(configJSON))
+		require.Error(t, err, fmt.Sprintf("'%s' should be an error", configJSON))
+		require.Contains(t, err.Error(),
+			"is not a supported SQL backend driver")
 	}
 }
 
 // If there is no DB url for non-memory backends, an error is returned.
-func TestParseInvalidStorageNoDBSource(t *testing.T) {
+func TestParseInvalidSQLStorageNoDBSource(t *testing.T) {
 	invalids := []string{
 		`{"storage": {"backend": "%s"}}`,
 		`{"storage": {"backend": "%s", "db_url": ""}}`,
 	}
-	for _, backend := range []string{MySQLBackend, SqliteBackend} {
+	for _, backend := range []string{notary.MySQLBackend, notary.SQLiteBackend} {
 		for _, configJSONFmt := range invalids {
 			configJSON := fmt.Sprintf(configJSONFmt, backend)
-			_, err := ParseStorage(configure(configJSON),
-				[]string{MySQLBackend, SqliteBackend})
-			assert.Error(t, err, fmt.Sprintf("'%s' should be an error", configJSON))
-			assert.Contains(t, err.Error(),
+			_, err := ParseSQLStorage(configure(configJSON))
+			require.Error(t, err, fmt.Sprintf("'%s' should be an error", configJSON))
+			require.Contains(t, err.Error(),
 				fmt.Sprintf("must provide a non-empty database source for %s", backend))
 		}
 	}
 }
 
-// If a memory storage backend is specified, no DB URL is necessary for a
-// successful storage parse.
-func TestParseStorageMemoryStore(t *testing.T) {
-	config := configure(`{"storage": {"backend": "MEMORY"}}`)
-	expected := Storage{Backend: MemoryBackend}
-
-	store, err := ParseStorage(config, []string{MySQLBackend, MemoryBackend})
-	assert.NoError(t, err)
-	assert.Equal(t, expected, *store)
-}
-
 // A supported backend with DB source will be successfully parsed.
-func TestParseStorageDBStore(t *testing.T) {
+func TestParseSQLStorageDBStore(t *testing.T) {
 	config := configure(`{
 		"storage": {
-			"backend": "MySQL",
+			"backend": "mysql",
 			"db_url": "username:passord@tcp(hostname:1234)/dbname"
 		}
 	}`)
@@ -215,19 +203,128 @@ func TestParseStorageDBStore(t *testing.T) {
 		Source:  "username:passord@tcp(hostname:1234)/dbname",
 	}
 
-	store, err := ParseStorage(config, []string{"mysql"})
-	assert.NoError(t, err)
-	assert.Equal(t, expected, *store)
+	store, err := ParseSQLStorage(config)
+	require.NoError(t, err)
+	require.Equal(t, expected, *store)
 }
 
-func TestParseStorageWithEnvironmentVariables(t *testing.T) {
+// ParseRethinkDBStorage will reject non rethink databases
+func TestParseRethinkStorageDBStoreInvalidBackend(t *testing.T) {
+	config := configure(`{
+		"storage": {
+			"backend": "mysql",
+			"db_url": "username:password@tcp(hostname:1234)/dbname",
+			"tls_ca_file": "/tls/ca.pem",
+			"client_cert_file": "/tls/cert.pem",
+			"client_key_file": "/tls/key.pem",
+			"database": "rethinkdbtest",
+			"username": "user"
+		}
+	}`)
+
+	_, err := ParseRethinkDBStorage(config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a supported RethinkDB backend")
+}
+
+// ParseRethinkDBStorage will require a db_url for rethink databases
+func TestParseRethinkStorageDBStoreEmptyDBUrl(t *testing.T) {
+	config := configure(`{
+		"storage": {
+			"backend": "rethinkdb",
+			"tls_ca_file": "/tls/ca.pem",
+			"client_cert_file": "/tls/cert.pem",
+			"client_key_file": "/tls/key.pem",
+			"database": "rethinkdbtest",
+			"username": "user",
+			"password": "password"
+		}
+	}`)
+
+	_, err := ParseRethinkDBStorage(config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must provide a non-empty host:port")
+}
+
+// ParseRethinkDBStorage will require a dbname for rethink databases
+func TestParseRethinkStorageDBStoreEmptyDBName(t *testing.T) {
+	config := configure(`{
+		"storage": {
+			"backend": "rethinkdb",
+			"db_url": "username:password@tcp(hostname:1234)/dbname",
+			"tls_ca_file": "/tls/ca.pem",
+			"client_cert_file": "/tls/cert.pem",
+			"client_key_file": "/tls/key.pem",
+			"username": "user"
+		}
+	}`)
+
+	_, err := ParseRethinkDBStorage(config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires a specific database to connect to")
+}
+
+// ParseRethinkDBStorage will require a CA cert for rethink databases
+func TestParseRethinkStorageDBStoreEmptyCA(t *testing.T) {
+	config := configure(`{
+		"storage": {
+			"backend": "rethinkdb",
+			"db_url": "username:password@tcp(hostname:1234)/dbname",
+			"database": "rethinkdbtest",
+			"client_cert_file": "/tls/cert.pem",
+			"client_key_file": "/tls/key.pem",
+			"username": "user"
+		}
+	}`)
+
+	_, err := ParseRethinkDBStorage(config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cowardly refusal to connect to rethinkdb without a CA cert")
+}
+
+// ParseRethinkDBStorage will require a client cert and key to connect to rethink databases
+func TestParseRethinkStorageDBStoreEmptyCertAndKey(t *testing.T) {
+	config := configure(`{
+		"storage": {
+			"backend": "rethinkdb",
+			"db_url": "username:password@tcp(hostname:1234)/dbname",
+			"database": "rethinkdbtest",
+			"tls_ca_file": "/tls/ca.pem",
+			"username": "user"
+		}
+	}`)
+
+	_, err := ParseRethinkDBStorage(config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cowardly refusal to connect to rethinkdb without a client cert")
+}
+
+// ParseRethinkDBStorage will require a username to connect to the database after bootstrapping
+func TestParseRethinkStorageDBStoreEmptyUsername(t *testing.T) {
+	config := configure(`{
+		"storage": {
+			"backend": "rethinkdb",
+			"db_url": "username:password@tcp(hostname:1234)/dbname",
+			"database": "rethinkdbtest",
+			"client_cert_file": "/tls/cert.pem",
+			"client_key_file": "/tls/key.pem",
+			"tls_ca_file": "/tls/ca.pem"
+		}
+	}`)
+
+	_, err := ParseRethinkDBStorage(config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires a username to connect to the db")
+}
+
+func TestParseSQLStorageWithEnvironmentVariables(t *testing.T) {
 	config := configure(`{
 		"storage": {
 			"db_url": "username:passord@tcp(hostname:1234)/dbname"
 		}
 	}`)
 
-	vars := map[string]string{"STORAGE_BACKEND": "MySQL"}
+	vars := map[string]string{"STORAGE_BACKEND": "mysql"}
 	setupEnvironmentVariables(t, vars)
 	defer cleanupEnvironmentVariables(t, vars)
 
@@ -236,9 +333,9 @@ func TestParseStorageWithEnvironmentVariables(t *testing.T) {
 		Source:  "username:passord@tcp(hostname:1234)/dbname",
 	}
 
-	store, err := ParseStorage(config, []string{"mysql"})
-	assert.NoError(t, err)
-	assert.Equal(t, expected, *store)
+	store, err := ParseSQLStorage(config)
+	require.NoError(t, err)
+	require.Equal(t, expected, *store)
 }
 
 // If TLS is required and the parameters are missing, an error is returned
@@ -249,8 +346,8 @@ func TestParseTLSNoTLSWhenRequired(t *testing.T) {
 	}
 	for _, configJSON := range invalids {
 		_, err := ParseServerTLS(configure(configJSON), true)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "no such file or directory")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no such file or directory")
 	}
 }
 
@@ -262,8 +359,8 @@ func TestParseTLSPartialTLS(t *testing.T) {
 	}
 	for _, configJSON := range invalids {
 		_, err := ParseServerTLS(configure(configJSON), false)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(),
+		require.Error(t, err)
+		require.Contains(t, err.Error(),
 			"either include both a cert and key file, or no TLS information at all to disable TLS")
 	}
 }
@@ -274,8 +371,8 @@ func TestParseTLSNoTLSNotRequired(t *testing.T) {
 	}`)
 
 	tlsConfig, err := ParseServerTLS(config, false)
-	assert.NoError(t, err)
-	assert.Nil(t, tlsConfig)
+	require.NoError(t, err)
+	require.Nil(t, tlsConfig)
 }
 
 func TestParseTLSWithTLS(t *testing.T) {
@@ -288,26 +385,26 @@ func TestParseTLSWithTLS(t *testing.T) {
 	}`, Cert, Key, Root))
 
 	tlsConfig, err := ParseServerTLS(config, false)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	expectedCert, err := tls.LoadX509KeyPair(Cert, Key)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	expectedRoot, err := trustmanager.LoadCertFromFile(Root)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Len(t, tlsConfig.Certificates, 1)
-	assert.True(t, reflect.DeepEqual(expectedCert, tlsConfig.Certificates[0]))
+	require.Len(t, tlsConfig.Certificates, 1)
+	require.True(t, reflect.DeepEqual(expectedCert, tlsConfig.Certificates[0]))
 
 	subjects := tlsConfig.ClientCAs.Subjects()
-	assert.Len(t, subjects, 1)
-	assert.True(t, bytes.Equal(expectedRoot.RawSubject, subjects[0]))
-	assert.Equal(t, tlsConfig.ClientAuth, tls.RequireAndVerifyClientCert)
+	require.Len(t, subjects, 1)
+	require.True(t, bytes.Equal(expectedRoot.RawSubject, subjects[0]))
+	require.Equal(t, tlsConfig.ClientAuth, tls.RequireAndVerifyClientCert)
 }
 
 func TestParseTLSWithTLSRelativeToConfigFile(t *testing.T) {
 	currDir, err := os.Getwd()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	config := configure(fmt.Sprintf(`{
 		"server": {
@@ -319,16 +416,16 @@ func TestParseTLSWithTLSRelativeToConfigFile(t *testing.T) {
 	config.SetConfigFile(filepath.Join(currDir, "me.json"))
 
 	tlsConfig, err := ParseServerTLS(config, false)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	expectedCert, err := tls.LoadX509KeyPair(Cert, Key)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Len(t, tlsConfig.Certificates, 1)
-	assert.True(t, reflect.DeepEqual(expectedCert, tlsConfig.Certificates[0]))
+	require.Len(t, tlsConfig.Certificates, 1)
+	require.True(t, reflect.DeepEqual(expectedCert, tlsConfig.Certificates[0]))
 
-	assert.Nil(t, tlsConfig.ClientCAs)
-	assert.Equal(t, tlsConfig.ClientAuth, tls.NoClientCert)
+	require.Nil(t, tlsConfig.ClientCAs)
+	require.Equal(t, tlsConfig.ClientAuth, tls.NoClientCert)
 }
 
 func TestParseTLSWithEnvironmentVariables(t *testing.T) {
@@ -347,21 +444,21 @@ func TestParseTLSWithEnvironmentVariables(t *testing.T) {
 	defer cleanupEnvironmentVariables(t, vars)
 
 	tlsConfig, err := ParseServerTLS(config, true)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	expectedCert, err := tls.LoadX509KeyPair(Cert, Key)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	expectedRoot, err := trustmanager.LoadCertFromFile(Root)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Len(t, tlsConfig.Certificates, 1)
-	assert.True(t, reflect.DeepEqual(expectedCert, tlsConfig.Certificates[0]))
+	require.Len(t, tlsConfig.Certificates, 1)
+	require.True(t, reflect.DeepEqual(expectedCert, tlsConfig.Certificates[0]))
 
 	subjects := tlsConfig.ClientCAs.Subjects()
-	assert.Len(t, subjects, 1)
-	assert.True(t, bytes.Equal(expectedRoot.RawSubject, subjects[0]))
-	assert.Equal(t, tlsConfig.ClientAuth, tls.RequireAndVerifyClientCert)
+	require.Len(t, subjects, 1)
+	require.True(t, bytes.Equal(expectedRoot.RawSubject, subjects[0]))
+	require.Equal(t, tlsConfig.ClientAuth, tls.RequireAndVerifyClientCert)
 }
 
 func TestParseViperWithInvalidFile(t *testing.T) {
@@ -369,13 +466,13 @@ func TestParseViperWithInvalidFile(t *testing.T) {
 	SetupViper(v, envPrefix)
 
 	err := ParseViper(v, "Chronicle_Of_Dark_Secrets.json")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "Could not read config")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Could not read config")
 }
 
 func TestParseViperWithValidFile(t *testing.T) {
 	file, err := os.Create("/tmp/Chronicle_Of_Dark_Secrets.json")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	defer os.Remove(file.Name())
 
 	file.WriteString(`{"logging": {"level": "debug"}}`)
@@ -384,7 +481,7 @@ func TestParseViperWithValidFile(t *testing.T) {
 	SetupViper(v, envPrefix)
 
 	err = ParseViper(v, "/tmp/Chronicle_Of_Dark_Secrets.json")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.Equal(t, "debug", v.GetString("logging.level"))
+	require.Equal(t, "debug", v.GetString("logging.level"))
 }

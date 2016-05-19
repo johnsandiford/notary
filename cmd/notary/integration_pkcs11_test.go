@@ -9,7 +9,7 @@ import (
 	"github.com/docker/notary/trustmanager/yubikey"
 	"github.com/docker/notary/tuf/data"
 	"github.com/spf13/cobra"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var _retriever passphrase.Retriever
@@ -26,7 +26,7 @@ func init() {
 	}
 
 	// best effort at removing keys here, so nil is fine
-	s, err := yubikey.NewYubiKeyStore(nil, _retriever)
+	s, err := yubikey.NewYubiStore(nil, _retriever)
 	if err != nil {
 		for k := range s.ListKeys() {
 			s.RemoveKey(k)
@@ -41,16 +41,16 @@ func init() {
 	}
 }
 
-var rootOnHardware = yubikey.YubikeyAccessible
+var rootOnHardware = yubikey.IsAccessible
 
 // Per-test set up deletes all keys on the yubikey
 func setUp(t *testing.T) {
 	//we're just removing keys here, so nil is fine
-	s, err := yubikey.NewYubiKeyStore(nil, _retriever)
-	assert.NoError(t, err)
+	s, err := yubikey.NewYubiStore(nil, _retriever)
+	require.NoError(t, err)
 	for k := range s.ListKeys() {
 		err := s.RemoveKey(k)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 }
 
@@ -59,13 +59,13 @@ func setUp(t *testing.T) {
 // on disk
 func verifyRootKeyOnHardware(t *testing.T, rootKeyID string) {
 	// do not bother verifying if there is no yubikey available
-	if yubikey.YubikeyAccessible() {
+	if yubikey.IsAccessible() {
 		// //we're just getting keys here, so nil is fine
-		s, err := yubikey.NewYubiKeyStore(nil, _retriever)
-		assert.NoError(t, err)
+		s, err := yubikey.NewYubiStore(nil, _retriever)
+		require.NoError(t, err)
 		privKey, role, err := s.GetKey(rootKeyID)
-		assert.NoError(t, err)
-		assert.NotNil(t, privKey)
-		assert.Equal(t, data.CanonicalRootRole, role)
+		require.NoError(t, err)
+		require.NotNil(t, privKey)
+		require.Equal(t, data.CanonicalRootRole, role)
 	}
 }

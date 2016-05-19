@@ -40,7 +40,7 @@ func (s *KeyManagementServer) CreateKey(ctx context.Context, algorithm *pb.Algor
 		return nil, fmt.Errorf("algorithm %s not supported for create key", algorithm.Algorithm)
 	}
 
-	tufKey, err := service.Create("", keyAlgo)
+	tufKey, err := service.Create("", "", keyAlgo)
 	if err != nil {
 		logger.Error("CreateKey: failed to create key: ", err)
 		return nil, grpc.Errorf(codes.Internal, "Key creation failed")
@@ -62,8 +62,8 @@ func (s *KeyManagementServer) DeleteKey(ctx context.Context, keyID *pb.KeyID) (*
 	logger := ctxu.GetLogger(ctx)
 
 	if err != nil {
-		logger.Errorf("DeleteKey: key %s not found", keyID.ID)
-		return nil, grpc.Errorf(codes.NotFound, "key %s not found", keyID.ID)
+		logger.Debugf("DeleteKey: key %s not found", keyID.ID)
+		return &pb.Void{}, nil
 	}
 
 	err = service.RemoveKey(keyID.ID)
@@ -71,8 +71,8 @@ func (s *KeyManagementServer) DeleteKey(ctx context.Context, keyID *pb.KeyID) (*
 	if err != nil {
 		switch err {
 		case keys.ErrInvalidKeyID:
-			logger.Errorf("DeleteKey: key %s not found", keyID.ID)
-			return nil, grpc.Errorf(codes.NotFound, "key %s not found", keyID.ID)
+			logger.Debugf("DeleteKey: key %s not found", keyID.ID)
+			return &pb.Void{}, nil
 		default:
 			logger.Error("DeleteKey: deleted key ", keyID.ID)
 			return nil, grpc.Errorf(codes.Internal, "Key deletion for KeyID %s failed", keyID.ID)
