@@ -3,12 +3,16 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
+	"os/signal"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/distribution/health"
 	_ "github.com/docker/distribution/registry/auth/htpasswd"
 	_ "github.com/docker/distribution/registry/auth/token"
 	"github.com/docker/go-connections/tlsconfig"
@@ -96,7 +100,7 @@ func getStore(configuration *viper.Viper, hRegister healthRegister) (
 			return nil, fmt.Errorf("Error starting %s driver: %s", backend, err.Error())
 		}
 		store = *storage.NewTUFMetaStorage(s)
-		hRegister("DB operational", s.CheckHealth, time.Minute)
+		hRegister("DB operational", time.Minute, s.CheckHealth)
 	case notary.RethinkDBBackend:
 		var sess *gorethink.Session
 		storeConfig, err := utils.ParseRethinkDBStorage(configuration)
@@ -118,7 +122,7 @@ func getStore(configuration *viper.Viper, hRegister healthRegister) (
 		}
 		s := storage.NewRethinkDBStorage(storeConfig.DBName, storeConfig.Username, storeConfig.Password, sess)
 		store = *storage.NewTUFMetaStorage(s)
-		hRegister("DB operational", s.CheckHealth, time.Minute)
+		hRegister("DB operational", time.Minute, s.CheckHealth)
 	default:
 		return nil, fmt.Errorf("%s is not a supported storage backend", backend)
 	}
@@ -126,7 +130,7 @@ func getStore(configuration *viper.Viper, hRegister healthRegister) (
 }
 
 type signerFactory func(hostname, port string, tlsConfig *tls.Config) *client.NotarySigner
-type healthRegister func(name string, checkFunc func() error, duration time.Duration)
+type healthRegister func(name string, duration time.Duration, check health.CheckFunc)
 
 // parses the configuration and determines which trust service and key algorithm
 // to return
@@ -168,6 +172,7 @@ func getTrustService(configuration *viper.Viper, sFactory signerFactory,
 		// If the trust service fails, the server is degraded but not
 		// exactly unhealthy, so always return healthy and just log an
 		// error.
+		minute,
 		func() error {
 			err := notarySigner.CheckHealth(minute)
 			if err != nil {
@@ -175,7 +180,7 @@ func getTrustService(configuration *viper.Viper, sFactory signerFactory,
 			}
 			return nil
 		},
-		minute)
+	)
 	return notarySigner, keyAlgo, nil
 }
 
@@ -275,4 +280,32 @@ func parseServerConfig(configFilePath string, hRegister healthRegister) (context
 		CurrentCacheControlConfig:    currentCache,
 		ConsistentCacheControlConfig: consistentCache,
 	}, nil
+}
+
+func setupSignalTrap() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, notary.NotarySupportedSignals...)
+	go func() {
+		for {
+			signalHandle(<-c)
+		}
+	}()
+}
+
+// signalHandle will increase/decrease the logging level via the signal we get.
+func signalHandle(sig os.Signal) {
+	switch sig {
+	case syscall.SIGUSR1:
+		if err := utils.AdjustLogLevel(true); err != nil {
+			fmt.Printf("Attempt to increase log level failed, will remain at %s level, error: %s\n", logrus.GetLevel(), err)
+			return
+		}
+	case syscall.SIGUSR2:
+		if err := utils.AdjustLogLevel(false); err != nil {
+			fmt.Printf("Attempt to decrease log level failed, will remain at %s level, error: %s\n", logrus.GetLevel(), err)
+			return
+		}
+	}
+
+	fmt.Println("Successfully setting log level to ", logrus.GetLevel())
 }

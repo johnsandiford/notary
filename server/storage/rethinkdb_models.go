@@ -12,7 +12,8 @@ const (
 )
 
 var (
-	tufFiles = rethinkdb.Table{
+	// TUFFilesRethinkTable is the table definition of notary server's TUF metadata files
+	TUFFilesRethinkTable = rethinkdb.Table{
 		Name:       RDBTUFFile{}.TableName(),
 		PrimaryKey: "gun_role_version",
 		SecondaryIndexes: map[string][]string{
@@ -26,13 +27,16 @@ var (
 		Config: map[string]string{
 			"write_acks": "majority",
 		},
+		JSONUnmarshaller: rdbTUFFileFromJSON,
 	}
 
-	keys = rethinkdb.Table{
+	// PubKeysRethinkTable is the table definition of notary server's public key information for TUF roles
+	PubKeysRethinkTable = rethinkdb.Table{
 		Name:       RDBKey{}.TableName(),
 		PrimaryKey: "id",
 		SecondaryIndexes: map[string][]string{
 			rdbGunRoleIdx: {"gun", "role"},
 		},
+		JSONUnmarshaller: rdbKeyFromJSON,
 	}
 )

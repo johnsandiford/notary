@@ -207,7 +207,7 @@ func createRepoAndKey(t *testing.T, rootType, tempBaseDir, gun, url string) (
 
 // creates a new notary repository with the same gun and url as the previous
 // repo, in order to eliminate caches (for instance, cryptoservice cache)
-// if a new directory is to be created, it also eliminates the tuf metadata
+// if a new directory is to be created, it also eliminates the TUF metadata
 // cache
 func newRepoToTestRepo(t *testing.T, existingRepo *NotaryRepository, newDir bool) (
 	*NotaryRepository, *passRoleRecorder) {
@@ -2414,7 +2414,7 @@ func TestPublishRemoveDelegationKeyFromDelegationRole(t *testing.T) {
 	// note there is no removekeyfromdelegation yet, so here's a hack to do so
 	newKey, err := ownerRepo.CryptoService.Create("targets/a", ownerRepo.gun, data.ECDSAKey)
 	require.NoError(t, err)
-	tdJSON, err := json.Marshal(&changelist.TufDelegation{
+	tdJSON, err := json.Marshal(&changelist.TUFDelegation{
 		NewThreshold: 1,
 		AddKeys:      data.KeyList([]data.PublicKey{newKey}),
 		RemoveKeys:   []string{aKey.ID()},
@@ -2422,7 +2422,7 @@ func TestPublishRemoveDelegationKeyFromDelegationRole(t *testing.T) {
 	require.NoError(t, err)
 
 	cl, err := changelist.NewFileChangelist(filepath.Join(ownerRepo.tufRepoPath, "changelist"))
-	require.NoError(t, cl.Add(changelist.NewTufChange(
+	require.NoError(t, cl.Add(changelist.NewTUFChange(
 		changelist.ActionUpdate,
 		"targets/a",
 		changelist.TypeTargetsDelegation,
@@ -3048,7 +3048,7 @@ func TestFullAddDelegationChangefileApplicable(t *testing.T) {
 	delegationName := "targets/a"
 
 	// manually create the changelist object to load multiple keys
-	tdJSON, err := json.Marshal(&changelist.TufDelegation{
+	tdJSON, err := json.Marshal(&changelist.TUFDelegation{
 		NewThreshold: notary.MinThreshold,
 		AddKeys:      data.KeyList([]data.PublicKey{rootPubKey, key2}),
 		AddPaths:     []string{"abc", "123", "xyz"},
@@ -3098,7 +3098,7 @@ func TestFullRemoveDelegationChangefileApplicable(t *testing.T) {
 	require.Len(t, targetRole.Signed.Delegations.Keys, 2)
 
 	// manually create the changelist object to load multiple keys
-	tdJSON, err := json.Marshal(&changelist.TufDelegation{
+	tdJSON, err := json.Marshal(&changelist.TUFDelegation{
 		RemoveKeys:  []string{key2CanonicalID},
 		RemovePaths: []string{"abc", "123"},
 	})
@@ -3491,28 +3491,28 @@ func TestGetAllTargetInfo(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, targetData)
 	require.Len(t, targetData, 3)
-	require.Contains(t, targetData, &TargetWithRole{Target: *targetsCurrentTarget, Role: data.CanonicalTargetsRole})
-	require.Contains(t, targetData, &TargetWithRole{Target: *level1CurrentTarget, Role: "targets/level1"})
-	require.Contains(t, targetData, &TargetWithRole{Target: *level2CurrentTarget, Role: "targets/level2"})
+	require.Equal(t, targetData[data.CanonicalTargetsRole], *targetsCurrentTarget)
+	require.Equal(t, targetData["targets/level1"], *level1CurrentTarget)
+	require.Equal(t, targetData["targets/level2"], *level2CurrentTarget)
 
 	targetData, err = repo.GetAllTargetMetadataByName("other")
 	require.NoError(t, err)
 	require.NotNil(t, targetData)
 	require.Len(t, targetData, 1)
-	require.Contains(t, targetData, &TargetWithRole{Target: *level1OtherTarget, Role: "targets/level1"})
+	require.Equal(t, targetData["targets/level1"], *level1OtherTarget)
 
 	targetData, err = repo.GetAllTargetMetadataByName("latest")
 	require.NoError(t, err)
 	require.NotNil(t, targetData)
 	require.Len(t, targetData, 1)
-	require.Contains(t, targetData, &TargetWithRole{Target: *targetsLatestTarget, Role: data.CanonicalTargetsRole})
+	require.Equal(t, targetData[data.CanonicalTargetsRole], *targetsLatestTarget)
 
 	targetData, err = repo.GetAllTargetMetadataByName("level2")
 	require.NoError(t, err)
 	require.NotNil(t, targetData)
 	require.Len(t, targetData, 2)
-	require.Contains(t, targetData, &TargetWithRole{Target: *level2Level2Target, Role: "targets/level2"})
-	require.Contains(t, targetData, &TargetWithRole{Target: *level1Level2Level2Target, Role: "targets/level1/level2"})
+	require.Equal(t, targetData["targets/level2"], *level2Level2Target)
+	require.Equal(t, targetData["targets/level1/level2"], *level1Level2Level2Target)
 
 	// nonexistent targets
 	targetData, err = repo.GetAllTargetMetadataByName("level23")

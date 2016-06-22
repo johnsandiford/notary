@@ -1,12 +1,13 @@
 package keydbstore
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/docker/notary/passphrase"
+	"github.com/docker/notary"
 	"github.com/docker/notary/storage/rethinkdb"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/tuf/data"
@@ -21,7 +22,7 @@ type RethinkDBKeyStore struct {
 	sess             *gorethink.Session
 	dbName           string
 	defaultPassAlias string
-	retriever        passphrase.Retriever
+	retriever        notary.PassRetriever
 	cachedKeys       map[string]data.PrivateKey
 	user             string
 	password         string
@@ -39,9 +40,46 @@ type RDBPrivateKey struct {
 	Private         string `gorethink:"private"`
 }
 
-var privateKeys = rethinkdb.Table{
-	Name:       RDBPrivateKey{}.TableName(),
-	PrimaryKey: RDBPrivateKey{}.KeyID,
+// gorethink can't handle an UnmarshalJSON function (see https://github.com/dancannon/gorethink/issues/201),
+// so do this here in an anonymous struct
+func rdbPrivateKeyFromJSON(data []byte) (interface{}, error) {
+	a := struct {
+		CreatedAt       time.Time `json:"created_at"`
+		UpdatedAt       time.Time `json:"updated_at"`
+		DeletedAt       time.Time `json:"deleted_at"`
+		KeyID           string    `json:"key_id"`
+		EncryptionAlg   string    `json:"encryption_alg"`
+		KeywrapAlg      string    `json:"keywrap_alg"`
+		Algorithm       string    `json:"algorithm"`
+		PassphraseAlias string    `json:"passphrase_alias"`
+		Public          string    `json:"public"`
+		Private         string    `json:"private"`
+	}{}
+	if err := json.Unmarshal(data, &a); err != nil {
+		return RDBPrivateKey{}, err
+	}
+	return RDBPrivateKey{
+		Timing: rethinkdb.Timing{
+			CreatedAt: a.CreatedAt,
+			UpdatedAt: a.UpdatedAt,
+			DeletedAt: a.DeletedAt,
+		},
+		KeyID:           a.KeyID,
+		EncryptionAlg:   a.EncryptionAlg,
+		KeywrapAlg:      a.KeywrapAlg,
+		Algorithm:       a.Algorithm,
+		PassphraseAlias: a.PassphraseAlias,
+		Public:          a.Public,
+		Private:         a.Private,
+	}, nil
+
+}
+
+// PrivateKeysRethinkTable is the table definition for notary signer's key information
+var PrivateKeysRethinkTable = rethinkdb.Table{
+	Name:             RDBPrivateKey{}.TableName(),
+	PrimaryKey:       RDBPrivateKey{}.KeyID,
+	JSONUnmarshaller: rdbPrivateKeyFromJSON,
 }
 
 // TableName sets a specific table name for our RDBPrivateKey
@@ -50,7 +88,7 @@ func (g RDBPrivateKey) TableName() string {
 }
 
 // NewRethinkDBKeyStore returns a new RethinkDBKeyStore backed by a RethinkDB database
-func NewRethinkDBKeyStore(dbName, username, password string, passphraseRetriever passphrase.Retriever, defaultPassAlias string, rethinkSession *gorethink.Session) *RethinkDBKeyStore {
+func NewRethinkDBKeyStore(dbName, username, password string, passphraseRetriever notary.PassRetriever, defaultPassAlias string, rethinkSession *gorethink.Session) *RethinkDBKeyStore {
 	cachedKeys := make(map[string]data.PrivateKey)
 
 	return &RethinkDBKeyStore{
@@ -243,7 +281,7 @@ func (rdb RethinkDBKeyStore) ExportKey(keyID string) ([]byte, error) {
 // Bootstrap sets up the database and tables, also creating the notary signer user with appropriate db permission
 func (rdb RethinkDBKeyStore) Bootstrap() error {
 	if err := rethinkdb.SetupDB(rdb.sess, rdb.dbName, []rethinkdb.Table{
-		privateKeys,
+		PrivateKeysRethinkTable,
 	}); err != nil {
 		return err
 	}

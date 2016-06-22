@@ -3,6 +3,7 @@ package storage
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"gopkg.in/dancannon/gorethink.v2"
 )
 
-// RDBTUFFile is a tuf file record
+// RDBTUFFile is a TUF file record
 type RDBTUFFile struct {
 	rethinkdb.Timing
 	GunRoleVersion []interface{} `gorethink:"gun_role_version"`
@@ -41,6 +42,47 @@ type RDBKey struct {
 // TableName returns the table name for the record type
 func (r RDBKey) TableName() string {
 	return "tuf_keys"
+}
+
+// gorethink can't handle an UnmarshalJSON function (see https://github.com/dancannon/gorethink/issues/201),
+// so do this here in an anonymous struct
+func rdbTUFFileFromJSON(data []byte) (interface{}, error) {
+	a := struct {
+		CreatedAt  time.Time `json:"created_at"`
+		UpdatedAt  time.Time `json:"updated_at"`
+		DeletedAt  time.Time `json:"deleted_at"`
+		Gun        string    `json:"gun"`
+		Role       string    `json:"role"`
+		Version    int       `json:"version"`
+		Sha256     string    `json:"sha256"`
+		Data       []byte    `json:"data"`
+		TSchecksum string    `json:"timestamp_checksum"`
+	}{}
+	if err := json.Unmarshal(data, &a); err != nil {
+		return RDBTUFFile{}, err
+	}
+	return RDBTUFFile{
+		Timing: rethinkdb.Timing{
+			CreatedAt: a.CreatedAt,
+			UpdatedAt: a.UpdatedAt,
+			DeletedAt: a.DeletedAt,
+		},
+		GunRoleVersion: []interface{}{a.Gun, a.Role, a.Version},
+		Gun:            a.Gun,
+		Role:           a.Role,
+		Version:        a.Version,
+		Sha256:         a.Sha256,
+		Data:           a.Data,
+		TSchecksum:     a.TSchecksum,
+	}, nil
+}
+
+func rdbKeyFromJSON(data []byte) (interface{}, error) {
+	rdb := RDBKey{}
+	if err := json.Unmarshal(data, &rdb); err != nil {
+		return RDBKey{}, err
+	}
+	return rdb, nil
 }
 
 // RethinkDB implements a MetaStore against the Rethink Database
@@ -269,8 +311,8 @@ func (rdb RethinkDB) deleteByTSChecksum(tsChecksum string) error {
 // Bootstrap sets up the database and tables, also creating the notary server user with appropriate db permission
 func (rdb RethinkDB) Bootstrap() error {
 	if err := rethinkdb.SetupDB(rdb.sess, rdb.dbName, []rethinkdb.Table{
-		tufFiles,
-		keys,
+		TUFFilesRethinkTable,
+		PubKeysRethinkTable,
 	}); err != nil {
 		return err
 	}

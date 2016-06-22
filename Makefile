@@ -17,9 +17,11 @@ GOOSES = darwin linux
 NOTARY_BUILDTAGS ?= pkcs11
 NOTARYDIR := /go/src/github.com/docker/notary
 
-GO_VERSION := $(shell go version | grep "1\.[6-9]\(\.[0-9]+\)*")
-# check to make sure we have the right version
-ifeq ($(strip $(GO_VERSION)),)
+GO_VERSION := $(shell go version | grep "1\.[6-9]\(\.[0-9]+\)*\|devel")
+# check to make sure we have the right version. development versions of Go are
+# not officially supported, but allowed for building
+
+ifeq ($(strip $(GO_VERSION))$(SKIPENVCHECK),)
 $(error Bad Go version - please install Go >= 1.6)
 endif
 
@@ -39,8 +41,6 @@ COVERDIR=.cover
 COVERPROFILE?=$(COVERDIR)/cover.out
 COVERMODE=count
 PKGS ?= $(shell go list -tags "${NOTARY_BUILDTAGS}" ./... | grep -v /vendor/ | tr '\n' ' ')
-
-GO_VERSION = $(shell go version | awk '{print $$3}')
 
 .PHONY: clean all fmt vet lint build test binaries cross cover docker-images notary-dockerfile
 .DELETE_ON_ERROR: cover
@@ -137,8 +137,9 @@ test-full: vet lint
 	@echo
 	go test -tags "${NOTARY_BUILDTAGS}" $(TESTOPTS) -v $(PKGS)
 
+integration: TESTDB = mysql
 integration:
-	buildscripts/integrationtest.sh development.yml
+	buildscripts/integrationtest.sh development.$(TESTDB).yml
 
 protos:
 	@protoc --go_out=plugins=grpc:. proto/*.proto

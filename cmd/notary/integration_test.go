@@ -83,7 +83,7 @@ func setupServer() *httptest.Server {
 
 // Initializes a repo, adds a target, publishes the target, lists the target,
 // verifies the target, and then removes the target.
-func TestClientTufInteraction(t *testing.T) {
+func TestClientTUFInteraction(t *testing.T) {
 	// -- setup --
 	setUp(t)
 
@@ -156,7 +156,7 @@ func TestClientTufInteraction(t *testing.T) {
 
 // Initializes a repo, adds a target, publishes the target by hash, lists the target,
 // verifies the target, and then removes the target.
-func TestClientTufAddByHashInteraction(t *testing.T) {
+func TestClientTUFAddByHashInteraction(t *testing.T) {
 	// -- setup --
 	setUp(t)
 
@@ -1138,7 +1138,7 @@ func exportRoot(t *testing.T, exportTo string) string {
 	// export does not require a password
 	oldNewCommand := NewNotaryCommand
 	NewNotaryCommand = func() *cobra.Command {
-		commander := &notaryCommander{getRetriever: func() passphrase.Retriever { return nil }}
+		commander := &notaryCommander{getRetriever: func() notary.PassRetriever { return nil }}
 		return commander.GetCommand()
 	}
 	defer func() { // but import will, later

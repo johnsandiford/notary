@@ -121,7 +121,7 @@ func repositoryFromKeystores(baseDir, gun, baseURL string, rt http.RoundTripper,
 }
 
 // Target represents a simplified version of the data TUF operates on, so external
-// applications don't have to depend on tuf data types.
+// applications don't have to depend on TUF data types.
 type Target struct {
 	Name   string      // the name of the target
 	Hashes data.Hashes // the hash of the target
@@ -314,7 +314,7 @@ func addChange(cl *changelist.FileChangelist, c changelist.Change, roles ...stri
 			}
 		}
 
-		changes = append(changes, changelist.NewTufChange(
+		changes = append(changes, changelist.NewTUFChange(
 			c.Action(),
 			role,
 			c.Type(),
@@ -352,7 +352,7 @@ func (r *NotaryRepository) AddTarget(target *Target, roles ...string) error {
 		return err
 	}
 
-	template := changelist.NewTufChange(
+	template := changelist.NewTUFChange(
 		changelist.ActionCreate, "", changelist.TypeTargetsTarget,
 		target.Name, metaJSON)
 	return addChange(cl, template, roles...)
@@ -368,7 +368,7 @@ func (r *NotaryRepository) RemoveTarget(targetName string, roles ...string) erro
 		return err
 	}
 	logrus.Debugf("Removing target \"%s\"", targetName)
-	template := changelist.NewTufChange(changelist.ActionDelete, "",
+	template := changelist.NewTUFChange(changelist.ActionDelete, "",
 		changelist.TypeTargetsTarget, targetName, nil)
 	return addChange(cl, template, roles...)
 }
@@ -463,13 +463,13 @@ func (r *NotaryRepository) GetTargetByName(name string, roles ...string) (*Targe
 }
 
 // GetAllTargetMetadataByName searches the entire delegation role tree to find the specified target by name for all
-// roles, and returns a list of TargetWithRole structs for each time it finds the specified target.
-func (r *NotaryRepository) GetAllTargetMetadataByName(name string) ([]*TargetWithRole, error) {
+// roles, and returns a map of role strings to Target structs for each time it finds the specified target.
+func (r *NotaryRepository) GetAllTargetMetadataByName(name string) (map[string]Target, error) {
 	if err := r.Update(false); err != nil {
 		return nil, err
 	}
 
-	var targetInfo []*TargetWithRole
+	targetInfoMap := make(map[string]Target)
 
 	// Define a visitor function to find the specified target
 	getAllTargetInfoByNameVisitorFunc := func(tgt *data.SignedTargets, validRole data.DelegationRole) interface{} {
@@ -479,7 +479,7 @@ func (r *NotaryRepository) GetAllTargetMetadataByName(name string) ([]*TargetWit
 		// We found the target and validated path compatibility in our walk,
 		// so add it to our list
 		if resultMeta, foundTarget := tgt.Signed.Targets[name]; foundTarget {
-			targetInfo = append(targetInfo, &TargetWithRole{Target: Target{Name: name, Hashes: resultMeta.Hashes, Length: resultMeta.Length}, Role: validRole.Name})
+			targetInfoMap[validRole.Name] = Target{Name: name, Hashes: resultMeta.Hashes, Length: resultMeta.Length}
 		}
 		// continue walking to all child roles
 		return nil
@@ -489,10 +489,10 @@ func (r *NotaryRepository) GetAllTargetMetadataByName(name string) ([]*TargetWit
 	if err := r.tufRepo.WalkTargets(name, "", getAllTargetInfoByNameVisitorFunc); err != nil {
 		return nil, err
 	}
-	if len(targetInfo) == 0 {
+	if len(targetInfoMap) == 0 {
 		return nil, fmt.Errorf("No trust data for %s", name)
 	}
-	return targetInfo, nil
+	return targetInfoMap, nil
 }
 
 // GetChangelist returns the list of the repository's unpublished changes
@@ -605,14 +605,14 @@ func (r *NotaryRepository) publish(cl changelist.Changelist) error {
 		return err
 	}
 
-	// these are the tuf files we will need to update, serialized as JSON before
+	// these are the TUF files we will need to update, serialized as JSON before
 	// we send anything to remote
 	updatedFiles := make(map[string][]byte)
 
 	// check if our root file is nearing expiry or dirty. Resign if it is.  If
 	// root is not dirty but we are publishing for the first time, then just
 	// publish the existing root we have.
-	if nearExpiry(r.tufRepo.Root) || r.tufRepo.Root.Dirty {
+	if nearExpiry(r.tufRepo.Root.Signed.SignedCommon) || r.tufRepo.Root.Dirty {
 		rootJSON, err := serializeCanonicalRole(r.tufRepo, data.CanonicalRootRole)
 		if err != nil {
 			return err
@@ -781,7 +781,10 @@ func (r *NotaryRepository) Update(forWrite bool) error {
 		}
 		return err
 	}
+	// we can be assured if we are at this stage that the repo we built is good
+	// no need to test the following function call for an error as it will always be fine should the repo be good- it is!
 	r.tufRepo = repo
+	warnRolesNearExpiry(repo)
 	return nil
 }
 
@@ -930,7 +933,7 @@ func (r *NotaryRepository) RotateKey(role string, serverManagesKey bool) error {
 func (r *NotaryRepository) rootFileKeyChange(cl changelist.Changelist, role, action string, key data.PublicKey) error {
 	kl := make(data.KeyList, 0, 1)
 	kl = append(kl, key)
-	meta := changelist.TufRootData{
+	meta := changelist.TUFRootData{
 		RoleName: role,
 		Keys:     kl,
 	}
@@ -939,7 +942,7 @@ func (r *NotaryRepository) rootFileKeyChange(cl changelist.Changelist, role, act
 		return err
 	}
 
-	c := changelist.NewTufChange(
+	c := changelist.NewTUFChange(
 		action,
 		changelist.ScopeRoot,
 		changelist.TypeRootRole,
