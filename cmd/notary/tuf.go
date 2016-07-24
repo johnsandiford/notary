@@ -259,7 +259,7 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	}
 	gun := args[0]
 
-	rt, err := getTransport(config, gun, false)
+	rt, err := getTransport(config, gun, readWrite)
 	if err != nil {
 		return err
 	}
@@ -278,30 +278,15 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	var rootKeyList []string
 
 	if t.rootKey != "" {
-		keyFile, err := os.Open(t.rootKey)
-		if err != nil {
-			return fmt.Errorf("Opening file for import: %v", err)
-		}
-		defer keyFile.Close()
-
-		pemBytes, err := ioutil.ReadAll(keyFile)
-		if err != nil {
-			return fmt.Errorf("Error reading input file: %v", err)
-		}
-		if err = cryptoservice.CheckRootKeyIsEncrypted(pemBytes); err != nil {
-			return err
-		}
-
-		privKey, _, err := trustmanager.GetPasswdDecryptBytes(t.retriever, pemBytes, "", data.CanonicalRootRole)
+		privKey, err := readRootKey(t.rootKey, t.retriever)
 		if err != nil {
 			return err
 		}
-
 		err = nRepo.CryptoService.AddKey(data.CanonicalRootRole, "", privKey)
 		if err != nil {
 			return fmt.Errorf("Error importing key: %v", err)
 		}
-		rootKeyList = []string{data.PublicKeyFromPrivate(privKey).ID()}
+		rootKeyList = []string{privKey.ID()}
 	} else {
 		rootKeyList = nRepo.CryptoService.ListKeys(data.CanonicalRootRole)
 	}
@@ -327,6 +312,30 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// Attempt to read an encrypted root key from a file, and return it as a data.PrivateKey
+func readRootKey(rootKeyFile string, retriever notary.PassRetriever) (data.PrivateKey, error) {
+	keyFile, err := os.Open(rootKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("Opening file to import as a root key: %v", err)
+	}
+	defer keyFile.Close()
+
+	pemBytes, err := ioutil.ReadAll(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("Error reading input root key file: %v", err)
+	}
+	if err = cryptoservice.CheckRootKeyIsEncrypted(pemBytes); err != nil {
+		return nil, err
+	}
+
+	privKey, _, err := trustmanager.GetPasswdDecryptBytes(retriever, pemBytes, "", data.CanonicalRootRole)
+	if err != nil {
+		return nil, err
+	}
+
+	return privKey, nil
+}
+
 func (t *tufCommander) tufList(cmd *cobra.Command, args []string) error {
 	if len(args) < 1 {
 		cmd.Usage()
@@ -338,7 +347,7 @@ func (t *tufCommander) tufList(cmd *cobra.Command, args []string) error {
 	}
 	gun := args[0]
 
-	rt, err := getTransport(config, gun, true)
+	rt, err := getTransport(config, gun, readOnly)
 	if err != nil {
 		return err
 	}
@@ -378,7 +387,7 @@ func (t *tufCommander) tufLookup(cmd *cobra.Command, args []string) error {
 	gun := args[0]
 	targetName := args[1]
 
-	rt, err := getTransport(config, gun, true)
+	rt, err := getTransport(config, gun, readOnly)
 	if err != nil {
 		return err
 	}
@@ -459,7 +468,7 @@ func (t *tufCommander) tufPublish(cmd *cobra.Command, args []string) error {
 
 	cmd.Println("Pushing changes to", gun)
 
-	rt, err := getTransport(config, gun, false)
+	rt, err := getTransport(config, gun, readWrite)
 	if err != nil {
 		return err
 	}
@@ -533,7 +542,7 @@ func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
 	gun := args[0]
 	targetName := args[1]
 
-	rt, err := getTransport(config, gun, true)
+	rt, err := getTransport(config, gun, readOnly)
 	if err != nil {
 		return err
 	}
@@ -604,14 +613,21 @@ func (ps passwordStore) Basic(u *url.URL) (string, string) {
 	return username, password
 }
 
-// getTransport returns an http.RoundTripper to be used for all http requests.
+type httpAccess int
+
+const (
+	readOnly httpAccess = iota
+	readWrite
+	admin
+)
+
 // It correctly handles the auth challenge/credentials required to interact
 // with a notary server over both HTTP Basic Auth and the JWT auth implemented
 // in the notary-server
 // The readOnly flag indicates if the operation should be performed as an
 // anonymous read only operation. If the command entered requires write
 // permissions on the server, readOnly must be false
-func getTransport(config *viper.Viper, gun string, readOnly bool) (http.RoundTripper, error) {
+func getTransport(config *viper.Viper, gun string, permission httpAccess) (http.RoundTripper, error) {
 	// Attempt to get a root CA from the config file. Nil is the host defaults.
 	rootCAFile := utils.GetPathRelativeToConfig(config, "remote_server.root_ca")
 	clientCert := utils.GetPathRelativeToConfig(config, "remote_server.tls_client_cert")
@@ -648,11 +664,11 @@ func getTransport(config *viper.Viper, gun string, readOnly bool) (http.RoundTri
 		DisableKeepAlives:   true,
 	}
 	trustServerURL := getRemoteTrustServer(config)
-	return tokenAuth(trustServerURL, base, gun, readOnly)
+	return tokenAuth(trustServerURL, base, gun, permission)
 }
 
 func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
-	readOnly bool) (http.RoundTripper, error) {
+	permission httpAccess) (http.RoundTripper, error) {
 
 	// TODO(dmcgowan): add notary specific headers
 	authTransport := transport.NewTransport(baseTransport)
@@ -699,20 +715,26 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
 		return nil, err
 	}
 
-	ps := passwordStore{anonymous: readOnly}
+	ps := passwordStore{anonymous: permission == readOnly}
 
 	var actions []string
-	if readOnly {
-		actions = []string{"pull"}
-	} else {
+	switch permission {
+	case admin:
+		actions = []string{"*"}
+	case readWrite:
 		actions = []string{"push", "pull"}
+	case readOnly:
+		actions = []string{"pull"}
+	default:
+		return nil, fmt.Errorf("Invalid permission requested for token authentication of gun %s", gun)
 	}
+
 	tokenHandler := auth.NewTokenHandler(authTransport, ps, gun, actions...)
 	basicHandler := auth.NewBasicHandler(ps)
 
 	modifier := auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler)
 
-	if !readOnly {
+	if permission != readOnly {
 		return newAuthRoundTripper(transport.NewTransport(baseTransport, modifier)), nil
 	}
 
