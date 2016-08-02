@@ -555,7 +555,8 @@ func TestClientDelegationsInteraction(t *testing.T) {
 	// list delegations - we should see no delegations
 	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
 	require.NoError(t, err)
-	require.Contains(t, output, "No delegations present in this repository.")
+	require.NotContains(t, output, keyID)
+	require.NotContains(t, output, keyID2)
 
 	// add delegation with multiple certs and multiple paths
 	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/delegation", tempFile.Name(), tempFile2.Name(), "--paths", "path1,path2")
@@ -946,6 +947,58 @@ func TestClientDelegationsPublishing(t *testing.T) {
 	output, err = runCommand(t, tempDir, "-s", server.URL, "list", "gun", "--roles", "targets/releases")
 	require.NoError(t, err)
 	require.Contains(t, output, "targets/releases")
+
+	// Setup another certificate
+	tempFile2, err := ioutil.TempFile("", "pemfile2")
+	require.NoError(t, err)
+
+	privKey, err = utils.GenerateECDSAKey(rand.Reader)
+	startTime = time.Now()
+	endTime = startTime.AddDate(10, 0, 0)
+	cert, err = cryptoservice.GenerateCertificate(privKey, "gun", startTime, endTime)
+	require.NoError(t, err)
+
+	_, err = tempFile2.Write(utils.CertToPEM(cert))
+	require.NoError(t, err)
+	require.NoError(t, err)
+	tempFile2.Close()
+	defer os.Remove(tempFile2.Name())
+
+	rawPubBytes2, _ := ioutil.ReadFile(tempFile2.Name())
+	parsedPubKey2, _ := utils.ParsePEMPublicKey(rawPubBytes2)
+	keyID2, err := utils.CanonicalKeyID(parsedPubKey2)
+	require.NoError(t, err)
+
+	// add a nested delegation under this releases role
+	output, err = runCommand(t, tempDir, "delegation", "add", "gun", "targets/releases/nested", tempFile2.Name(), "--paths", "nested/path")
+	require.NoError(t, err)
+	require.Contains(t, output, "Addition of delegation role")
+	require.Contains(t, output, keyID2)
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	require.NoError(t, err)
+
+	// list delegations - we should see two roles
+	output, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	require.NoError(t, err)
+	require.Contains(t, output, "targets/releases")
+	require.Contains(t, output, "targets/releases/nested")
+	require.Contains(t, output, canonicalKeyID)
+	require.Contains(t, output, keyID2)
+	require.Contains(t, output, "nested/path")
+	require.Contains(t, output, "\"\"")
+	require.Contains(t, output, "<all paths>")
+
+	// remove by force to delete the nested delegation entirely
+	output, err = runCommand(t, tempDir, "delegation", "remove", "gun", "targets/releases/nested", "-y")
+	require.NoError(t, err)
+	require.Contains(t, output, "Forced removal (including all keys and paths) of delegation role")
+
+	// publish repo
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	require.NoError(t, err)
+
 }
 
 // Splits a string into lines, and returns any lines that are not empty (
@@ -1238,4 +1291,78 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestPurge(t *testing.T) {
+	setUp(t)
+
+	tempDir := tempDirWithConfig(t, "{}")
+	defer os.RemoveAll(tempDir)
+
+	server := setupServer()
+	defer server.Close()
+
+	startTime := time.Now()
+	endTime := startTime.AddDate(10, 0, 0)
+
+	// Setup certificates
+	tempFile, err := ioutil.TempFile("", "pemfile")
+	require.NoError(t, err)
+	privKey, err := utils.GenerateECDSAKey(rand.Reader)
+	cert, err := cryptoservice.GenerateCertificate(privKey, "gun", startTime, endTime)
+	require.NoError(t, err)
+	_, err = tempFile.Write(utils.CertToPEM(cert))
+	require.NoError(t, err)
+	tempFile.Close()
+	defer os.Remove(tempFile.Name())
+	rawPubBytes, _ := ioutil.ReadFile(tempFile.Name())
+	parsedPubKey, _ := utils.ParsePEMPublicKey(rawPubBytes)
+	keyID, err := utils.CanonicalKeyID(parsedPubKey)
+	require.NoError(t, err)
+
+	delgName := "targets/delegation"
+
+	_, err = runCommand(t, tempDir, "-s", server.URL, "init", "gun")
+	require.NoError(t, err)
+
+	_, err = runCommand(t, tempDir, "delegation", "add", "gun", delgName, tempFile.Name(), "--all-paths")
+	require.NoError(t, err)
+
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	require.NoError(t, err)
+
+	// remove targets key and ensure we fail to publish
+	out, err := runCommand(t, tempDir, "key", "list")
+	require.NoError(t, err)
+	lines := splitLines(out)
+	if len(lines) == 1 && lines[0] == "No signing keys found." {
+		t.Fail()
+	}
+	var targetsKeyID string
+	for _, line := range lines[2:] {
+		parts := strings.Fields(line)
+		if strings.TrimSpace(parts[0]) == data.CanonicalTargetsRole {
+			targetsKeyID = strings.TrimSpace(parts[2])
+			break
+		}
+	}
+
+	if targetsKeyID == "" {
+		t.Fail()
+	}
+
+	err = os.Remove(filepath.Join(tempDir, notary.PrivDir, notary.NonRootKeysSubdir, "gun", targetsKeyID+".key"))
+	require.NoError(t, err)
+
+	_, err = runCommand(t, tempDir, "delegation", "purge", "gun", "--key", keyID)
+	require.NoError(t, err)
+
+	// publish doesn't error because purge only updates the roles we have signing keys for
+	_, err = runCommand(t, tempDir, "-s", server.URL, "publish", "gun")
+	require.NoError(t, err)
+
+	// check the delegation wasn't removed
+	out, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "list", "gun")
+	require.NoError(t, err)
+	require.Contains(t, out, delgName)
 }

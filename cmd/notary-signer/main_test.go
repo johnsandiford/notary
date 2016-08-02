@@ -40,16 +40,15 @@ func configure(jsonConfig string) *viper.Viper {
 // error is propagated.
 func TestGetAddrAndTLSConfigInvalidTLS(t *testing.T) {
 	invalids := []string{
-		`{"server": {"http_addr": ":1234", "grpc_addr": ":2345"}}`,
+		`{"server": {"grpc_addr": ":2345"}}`,
 		`{"server": {
-				"http_addr": ":1234",
 				"grpc_addr": ":2345",
 				"tls_cert_file": "nope",
 				"tls_key_file": "nope"
 		}}`,
 	}
 	for _, configJSON := range invalids {
-		_, _, _, err := getAddrAndTLSConfig(configure(configJSON))
+		_, _, err := getAddrAndTLSConfig(configure(configJSON))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unable to set up TLS")
 	}
@@ -57,9 +56,8 @@ func TestGetAddrAndTLSConfigInvalidTLS(t *testing.T) {
 
 // If a GRPC address is not provided, an error is returned.
 func TestGetAddrAndTLSConfigNoGRPCAddr(t *testing.T) {
-	_, _, _, err := getAddrAndTLSConfig(configure(fmt.Sprintf(`{
+	_, _, err := getAddrAndTLSConfig(configure(fmt.Sprintf(`{
 		"server": {
-			"http_addr": ":1234",
 			"tls_cert_file": "%s",
 			"tls_key_file": "%s"
 		}
@@ -68,31 +66,16 @@ func TestGetAddrAndTLSConfigNoGRPCAddr(t *testing.T) {
 	require.Contains(t, err.Error(), "grpc listen address required for server")
 }
 
-// If an HTTP address is not provided, an error is returned.
-func TestGetAddrAndTLSConfigNoHTTPAddr(t *testing.T) {
-	_, _, _, err := getAddrAndTLSConfig(configure(fmt.Sprintf(`{
-		"server": {
-			"grpc_addr": ":1234",
-			"tls_cert_file": "%s",
-			"tls_key_file": "%s"
-		}
-	}`, Cert, Key)))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "http listen address required for server")
-}
-
 // Success parsing a valid TLS config, HTTP address, and GRPC address.
 func TestGetAddrAndTLSConfigSuccess(t *testing.T) {
-	httpAddr, grpcAddr, tlsConf, err := getAddrAndTLSConfig(configure(fmt.Sprintf(`{
+	grpcAddr, tlsConf, err := getAddrAndTLSConfig(configure(fmt.Sprintf(`{
 		"server": {
-			"http_addr": ":2345",
 			"grpc_addr": ":1234",
 			"tls_cert_file": "%s",
 			"tls_key_file": "%s"
 		}
 	}`, Cert, Key)))
 	require.NoError(t, err)
-	require.Equal(t, ":2345", httpAddr)
 	require.Equal(t, ":1234", grpcAddr)
 	require.NotNil(t, tlsConf)
 }
@@ -108,7 +91,8 @@ func TestSetupCryptoServicesDBStoreNoDefaultAlias(t *testing.T) {
 		configure(fmt.Sprintf(
 			`{"storage": {"backend": "%s", "db_url": "%s"}}`,
 			notary.SQLiteBackend, tmpFile.Name())),
-		[]string{notary.SQLiteBackend})
+		[]string{notary.SQLiteBackend},
+		false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must provide a default alias for the key DB")
 }
@@ -129,7 +113,7 @@ func TestSetupCryptoServicesRethinkDBStoreNoDefaultAlias(t *testing.T) {
 				}
 			}`,
 			notary.RethinkDBBackend)),
-		[]string{notary.RethinkDBBackend})
+		[]string{notary.RethinkDBBackend}, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must provide a default alias for the key DB")
 }
@@ -151,7 +135,7 @@ func TestSetupCryptoServicesRethinkDBStoreConnectionFails(t *testing.T) {
 				"default_alias": "timestamp"
 			}`,
 			notary.RethinkDBBackend)),
-		[]string{notary.RethinkDBBackend})
+		[]string{notary.RethinkDBBackend}, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no connections were made when creating the session")
 }
@@ -182,7 +166,7 @@ func TestSetupCryptoServicesDBStoreSuccess(t *testing.T) {
 			`{"storage": {"backend": "%s", "db_url": "%s"},
 			"default_alias": "timestamp"}`,
 			notary.SQLiteBackend, tmpFile.Name())),
-		[]string{notary.SQLiteBackend})
+		[]string{notary.SQLiteBackend}, false)
 	require.NoError(t, err)
 	require.Len(t, cryptoServices, 2)
 
@@ -211,7 +195,7 @@ func TestSetupCryptoServicesMemoryStore(t *testing.T) {
 	config := configure(fmt.Sprintf(`{"storage": {"backend": "%s"}}`,
 		notary.MemoryBackend))
 	cryptoServices, err := setUpCryptoservices(config,
-		[]string{notary.SQLiteBackend, notary.MemoryBackend})
+		[]string{notary.SQLiteBackend, notary.MemoryBackend}, false)
 	require.NoError(t, err)
 	require.Len(t, cryptoServices, 2)
 
@@ -236,15 +220,9 @@ func TestSetupCryptoServicesInvalidStore(t *testing.T) {
 	config := configure(fmt.Sprintf(`{"storage": {"backend": "%s"}}`,
 		"invalid_backend"))
 	_, err := setUpCryptoservices(config,
-		[]string{notary.SQLiteBackend, notary.MemoryBackend, notary.RethinkDBBackend})
+		[]string{notary.SQLiteBackend, notary.MemoryBackend, notary.RethinkDBBackend}, false)
 	require.Error(t, err)
 	require.Equal(t, err.Error(), fmt.Sprintf("%s is not an allowed backend, must be one of: %s", "invalid_backend", []string{notary.SQLiteBackend, notary.MemoryBackend, notary.RethinkDBBackend}))
-}
-
-func TestSetupHTTPServer(t *testing.T) {
-	httpServer := setupHTTPServer(":4443", nil, make(signer.CryptoServiceIndex))
-	require.Equal(t, ":4443", httpServer.Addr)
-	require.Nil(t, httpServer.TLSConfig)
 }
 
 func TestSetupGRPCServerInvalidAddress(t *testing.T) {
@@ -294,6 +272,6 @@ func TestSampleConfig(t *testing.T) {
 	// if using signer.Dockerfile.
 	os.Setenv("NOTARY_SIGNER_DEFAULT_ALIAS", "timestamp_1")
 	defer os.Unsetenv("NOTARY_SIGNER_DEFAULT_ALIAS")
-	_, err := parseSignerConfig("../../fixtures/signer-config-local.json")
+	_, err := parseSignerConfig("../../fixtures/signer-config-local.json", false)
 	require.NoError(t, err)
 }

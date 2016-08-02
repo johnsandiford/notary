@@ -2325,6 +2325,25 @@ func TestPublishTargetsDelegationSuccessNeedsToDownloadRoles(t *testing.T) {
 	// delegation parents all get signed
 	ownerRec.requireAsked(t, []string{data.CanonicalTargetsRole, "targets/a"})
 
+	// assert both delegation roles appear to the other repo in a call to GetDelegationRoles
+	delgRoleList, err := delgRepo.GetDelegationRoles()
+	require.NoError(t, err)
+	require.Len(t, delgRoleList, 2)
+	// The walk is a pre-order so we can enforce ordering.  Also check that canonical key IDs are reported from this walk
+	require.Equal(t, delgRoleList[0].Name, "targets/a")
+	require.NotContains(t, delgRoleList[0].KeyIDs, ownerRepo.tufRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Roles[0].KeyIDs)
+	canonicalAKeyID, err := utils.CanonicalKeyID(aKey)
+	require.NoError(t, err)
+	require.Contains(t, delgRoleList[0].KeyIDs, canonicalAKeyID)
+	require.Equal(t, delgRoleList[1].Name, "targets/a/b")
+	require.NotContains(t, delgRoleList[1].KeyIDs, ownerRepo.tufRepo.Targets["targets/a"].Signed.Delegations.Roles[0].KeyIDs)
+	canonicalBKeyID, err := utils.CanonicalKeyID(bKey)
+	require.NoError(t, err)
+	require.Contains(t, delgRoleList[1].KeyIDs, canonicalBKeyID)
+	// assert that the key ID data didn't somehow change between the two repos, since we translated to canonical key IDs
+	require.Equal(t, ownerRepo.tufRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Roles[0].KeyIDs, delgRepo.tufRepo.Targets[data.CanonicalTargetsRole].Signed.Delegations.Roles[0].KeyIDs)
+	require.Equal(t, ownerRepo.tufRepo.Targets["targets/a"].Signed.Delegations.Roles[0].KeyIDs, delgRepo.tufRepo.Targets["targets/a"].Signed.Delegations.Roles[0].KeyIDs)
+
 	// delegated repo now publishes to delegated roles, but it will need
 	// to download those roles first, since it doesn't know about them
 	requirePublishToRolesSucceeds(t, delgRepo, []string{"targets/a/b"},
@@ -3022,7 +3041,7 @@ func TestRemoveDelegationChangefileApplicable(t *testing.T) {
 	require.NoError(t, applyTargetsChange(repo.tufRepo, changes[2]))
 
 	targetRole = repo.tufRepo.Targets[data.CanonicalTargetsRole]
-	require.Empty(t, targetRole.Signed.Delegations.Roles)
+	require.Len(t, targetRole.Signed.Delegations.Roles, 1)
 	require.Empty(t, targetRole.Signed.Delegations.Keys)
 }
 

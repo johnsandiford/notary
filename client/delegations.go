@@ -155,9 +155,11 @@ func (r *NotaryRepository) RemoveDelegationPaths(name string, paths []string) er
 // RemoveDelegationKeys creates a changelist entry to remove provided keys from an existing delegation.
 // When this changelist is applied, if the specified keys are the only keys left in the role,
 // the role itself will be deleted in its entirety.
+// It can also delete a key from all delegations under a parent using a name
+// with a wildcard at the end.
 func (r *NotaryRepository) RemoveDelegationKeys(name string, keyIDs []string) error {
 
-	if !data.IsDelegation(name) {
+	if !data.IsDelegation(name) && !data.IsWildDelegation(name) {
 		return data.ErrInvalidRole{Role: name, Reason: "invalid delegation role name"}
 	}
 
@@ -238,7 +240,7 @@ func newDeleteDelegationChange(name string, content []byte) *changelist.TUFChang
 
 // GetDelegationRoles returns the keys and roles of the repository's delegations
 // Also converts key IDs to canonical key IDs to keep consistent with signing prompts
-func (r *NotaryRepository) GetDelegationRoles() ([]*data.Role, error) {
+func (r *NotaryRepository) GetDelegationRoles() ([]data.Role, error) {
 	// Update state of the repo to latest
 	if err := r.Update(false); err != nil {
 		return nil, err
@@ -251,7 +253,7 @@ func (r *NotaryRepository) GetDelegationRoles() ([]*data.Role, error) {
 	}
 
 	// make a copy for traversing nested delegations
-	allDelegations := []*data.Role{}
+	allDelegations := []data.Role{}
 
 	// Define a visitor function to populate the delegations list and translate their key IDs to canonical IDs
 	delegationCanonicalListVisitor := func(tgt *data.SignedTargets, validRole data.DelegationRole) interface{} {
@@ -271,20 +273,23 @@ func (r *NotaryRepository) GetDelegationRoles() ([]*data.Role, error) {
 	return allDelegations, nil
 }
 
-func translateDelegationsToCanonicalIDs(delegationInfo data.Delegations) ([]*data.Role, error) {
-	canonicalDelegations := make([]*data.Role, len(delegationInfo.Roles))
-	copy(canonicalDelegations, delegationInfo.Roles)
+func translateDelegationsToCanonicalIDs(delegationInfo data.Delegations) ([]data.Role, error) {
+	canonicalDelegations := make([]data.Role, len(delegationInfo.Roles))
+	// Do a copy by value to ensure local delegation metadata is untouched
+	for idx, origRole := range delegationInfo.Roles {
+		canonicalDelegations[idx] = *origRole
+	}
 	delegationKeys := delegationInfo.Keys
 	for i, delegation := range canonicalDelegations {
 		canonicalKeyIDs := []string{}
 		for _, keyID := range delegation.KeyIDs {
 			pubKey, ok := delegationKeys[keyID]
 			if !ok {
-				return nil, fmt.Errorf("Could not translate canonical key IDs for %s", delegation.Name)
+				return []data.Role{}, fmt.Errorf("Could not translate canonical key IDs for %s", delegation.Name)
 			}
 			canonicalKeyID, err := utils.CanonicalKeyID(pubKey)
 			if err != nil {
-				return nil, fmt.Errorf("Could not translate canonical key IDs for %s: %v", delegation.Name, err)
+				return []data.Role{}, fmt.Errorf("Could not translate canonical key IDs for %s: %v", delegation.Name, err)
 			}
 			canonicalKeyIDs = append(canonicalKeyIDs, canonicalKeyID)
 		}
