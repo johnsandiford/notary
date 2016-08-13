@@ -9,15 +9,17 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io/ioutil"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 	"text/template"
-
 	"time"
 
+	"github.com/Sirupsen/logrus"
+	"github.com/docker/notary"
 	"github.com/docker/notary/cryptoservice"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/trustpinning"
@@ -183,7 +185,9 @@ func TestValidateRootWithPinnedCert(t *testing.T) {
 	// This call to trustpinning.ValidateRoot should also succeed with the correct Cert ID (same as root public key ID), even though we passed an extra bad one
 	validatedSignedRoot, err = trustpinning.ValidateRoot(nil, &testSignedRoot, "docker.com/notary", trustpinning.TrustPinConfig{Certs: map[string][]string{"docker.com/notary": {rootPubKeyID, "invalidID"}}, DisableTOFU: true})
 	require.NoError(t, err)
-	require.Equal(t, validatedSignedRoot, typedSignedRoot)
+	// This extra assignment is necessary because ValidateRoot calls through to a successful VerifySignature which marks IsValid
+	typedSignedRoot.Signatures[0].IsValid = true
+	require.Equal(t, typedSignedRoot, validatedSignedRoot)
 }
 
 func TestValidateRootWithPinnerCertAndIntermediates(t *testing.T) {
@@ -519,6 +523,8 @@ func TestValidateRootWithPinnedCA(t *testing.T) {
 	// Check that we validate correctly against a pinned CA and provided bundle
 	validatedRoot, err = trustpinning.ValidateRoot(nil, newTestSignedRoot, "notary-signer", trustpinning.TrustPinConfig{CA: map[string]string{"notary-signer": bundleWithExpiredCertPath}, DisableTOFU: true})
 	require.NoError(t, err)
+	// this extra assignment is necessary because ValidateRoot calls through to a successful VerifySignature which marks IsValid
+	newTypedSignedRoot.Signatures[0].IsValid = true
 	require.Equal(t, newTypedSignedRoot, validatedRoot)
 
 	testPubKey2, err := cryptoService.Create("root", "notary-signer", data.ECDSAKey)
@@ -782,9 +788,9 @@ func testValidateRootRotationMissingNewSig(t *testing.T, keyAlg, rootKeyType str
 	require.Error(t, err, "insuficient signatures on root")
 }
 
-func generateTestingCertificate(rootKey data.PrivateKey, gun string) (*x509.Certificate, error) {
+func generateTestingCertificate(rootKey data.PrivateKey, gun string, timeToExpire time.Duration) (*x509.Certificate, error) {
 	startTime := time.Now()
-	return cryptoservice.GenerateCertificate(rootKey, gun, startTime, startTime.AddDate(10, 0, 0))
+	return cryptoservice.GenerateCertificate(rootKey, gun, startTime, startTime.Add(timeToExpire))
 }
 
 func generateExpiredTestingCertificate(rootKey data.PrivateKey, gun string) (*x509.Certificate, error) {
@@ -799,4 +805,245 @@ func generateRootKeyIDs(r *data.SignedRoot) {
 			_ = k.ID()
 		}
 	}
+}
+
+func TestCheckingCertExpiry(t *testing.T) {
+	gun := "notary"
+	pass := func(keyName, alias string, createNew bool, attempts int) (passphrase string, giveup bool, err error) {
+		return "password", false, nil
+	}
+	memStore := trustmanager.NewKeyMemoryStore(pass)
+	cs := cryptoservice.NewCryptoService(memStore)
+	testPubKey, err := cs.Create(data.CanonicalRootRole, gun, data.ECDSAKey)
+	require.NoError(t, err)
+	testPrivKey, _, err := memStore.GetKey(testPubKey.ID())
+	require.NoError(t, err)
+
+	almostExpiredCert, err := generateTestingCertificate(testPrivKey, gun, notary.Day*30)
+	require.NoError(t, err)
+	almostExpiredPubKey, err := utils.ParsePEMPublicKey(utils.CertToPEM(almostExpiredCert))
+	require.NoError(t, err)
+
+	// set up a logrus logger to capture warning output
+	origLevel := logrus.GetLevel()
+	logrus.SetLevel(logrus.WarnLevel)
+	defer logrus.SetLevel(origLevel)
+	logBuf := bytes.NewBuffer(nil)
+	logrus.SetOutput(logBuf)
+
+	rootRole, err := data.NewRole(data.CanonicalRootRole, 1, []string{almostExpiredPubKey.ID()}, nil)
+	require.NoError(t, err)
+	testRoot, err := data.NewRoot(
+		map[string]data.PublicKey{almostExpiredPubKey.ID(): almostExpiredPubKey},
+		map[string]*data.RootRole{
+			data.CanonicalRootRole:      &rootRole.RootRole,
+			data.CanonicalTimestampRole: &rootRole.RootRole,
+			data.CanonicalTargetsRole:   &rootRole.RootRole,
+			data.CanonicalSnapshotRole:  &rootRole.RootRole},
+		false,
+	)
+	testRoot.Signed.Version = 1
+	require.NoError(t, err, "Failed to create new root")
+
+	signedTestRoot, err := testRoot.ToSigned()
+	require.NoError(t, err)
+
+	err = signed.Sign(cs, signedTestRoot, []data.PublicKey{almostExpiredPubKey}, 1, nil)
+	require.NoError(t, err)
+
+	// This is a valid root certificate, but check that we get a Warn-level message that the certificate is near expiry
+	_, err = trustpinning.ValidateRoot(nil, signedTestRoot, gun, trustpinning.TrustPinConfig{})
+	require.NoError(t, err)
+	require.Contains(t, logBuf.String(), fmt.Sprintf("certificate with CN %s is near expiry", gun))
+
+	expiredCert, err := generateExpiredTestingCertificate(testPrivKey, gun)
+	require.NoError(t, err)
+	expiredPubKey := utils.CertToKey(expiredCert)
+
+	rootRole, err = data.NewRole(data.CanonicalRootRole, 1, []string{expiredPubKey.ID()}, nil)
+	require.NoError(t, err)
+	testRoot, err = data.NewRoot(
+		map[string]data.PublicKey{expiredPubKey.ID(): expiredPubKey},
+		map[string]*data.RootRole{
+			data.CanonicalRootRole:      &rootRole.RootRole,
+			data.CanonicalTimestampRole: &rootRole.RootRole,
+			data.CanonicalTargetsRole:   &rootRole.RootRole,
+			data.CanonicalSnapshotRole:  &rootRole.RootRole},
+		false,
+	)
+	testRoot.Signed.Version = 1
+	require.NoError(t, err, "Failed to create new root")
+
+	signedTestRoot, err = testRoot.ToSigned()
+	require.NoError(t, err)
+
+	err = signed.Sign(cs, signedTestRoot, []data.PublicKey{expiredPubKey}, 1, nil)
+	require.NoError(t, err)
+
+	// This is an invalid root certificate since it's expired
+	_, err = trustpinning.ValidateRoot(nil, signedTestRoot, gun, trustpinning.TrustPinConfig{})
+	require.Error(t, err)
+}
+
+func TestValidateRootWithExpiredIntermediate(t *testing.T) {
+	now := time.Now()
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+
+	pass := func(keyName, alias string, createNew bool, attempts int) (passphrase string, giveup bool, err error) {
+		return "password", false, nil
+	}
+	memStore := trustmanager.NewKeyMemoryStore(pass)
+	cs := cryptoservice.NewCryptoService(memStore)
+
+	// generate CA cert
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	require.NoError(t, err)
+	caTmpl := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "notary testing CA",
+		},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:       true,
+		MaxPathLen: 3,
+	}
+	caPrivKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	_, err = x509.CreateCertificate(
+		rand.Reader,
+		&caTmpl,
+		&caTmpl,
+		caPrivKey.Public(),
+		caPrivKey,
+	)
+
+	// generate expired intermediate
+	intTmpl := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "EXPIRED notary testing intermediate",
+		},
+		NotBefore:             now.Add(-2 * notary.Year),
+		NotAfter:              now.Add(-notary.Year),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:       true,
+		MaxPathLen: 2,
+	}
+	intPrivKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	intCert, err := x509.CreateCertificate(
+		rand.Reader,
+		&intTmpl,
+		&caTmpl,
+		intPrivKey.Public(),
+		caPrivKey,
+	)
+	require.NoError(t, err)
+
+	// generate leaf
+	serialNumber, err = rand.Int(rand.Reader, serialNumberLimit)
+	require.NoError(t, err)
+	leafTmpl := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "docker.io/notary/test",
+		},
+		NotBefore: now.Add(-time.Hour),
+		NotAfter:  now.Add(time.Hour),
+
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+		BasicConstraintsValid: true,
+	}
+
+	leafPubKey, err := cs.Create("root", "docker.io/notary/test", data.ECDSAKey)
+	require.NoError(t, err)
+	leafPrivKey, _, err := cs.GetPrivateKey(leafPubKey.ID())
+	require.NoError(t, err)
+	signer := leafPrivKey.CryptoSigner()
+	leafCert, err := x509.CreateCertificate(
+		rand.Reader,
+		&leafTmpl,
+		&intTmpl,
+		signer.Public(),
+		intPrivKey,
+	)
+
+	rootBundleWriter := bytes.NewBuffer(nil)
+	pem.Encode(
+		rootBundleWriter,
+		&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: leafCert,
+		},
+	)
+	pem.Encode(
+		rootBundleWriter,
+		&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: intCert,
+		},
+	)
+
+	rootBundle := rootBundleWriter.Bytes()
+
+	ecdsax509Key := data.NewECDSAx509PublicKey(rootBundle)
+
+	otherKey, err := cs.Create("targets", "docker.io/notary/test", data.ED25519Key)
+	require.NoError(t, err)
+
+	root := data.SignedRoot{
+		Signatures: make([]data.Signature, 0),
+		Signed: data.Root{
+			SignedCommon: data.SignedCommon{
+				Type:    "Root",
+				Expires: now.Add(time.Hour),
+				Version: 1,
+			},
+			Keys: map[string]data.PublicKey{
+				ecdsax509Key.ID(): ecdsax509Key,
+				otherKey.ID():     otherKey,
+			},
+			Roles: map[string]*data.RootRole{
+				"root": {
+					KeyIDs:    []string{ecdsax509Key.ID()},
+					Threshold: 1,
+				},
+				"targets": {
+					KeyIDs:    []string{otherKey.ID()},
+					Threshold: 1,
+				},
+				"snapshot": {
+					KeyIDs:    []string{otherKey.ID()},
+					Threshold: 1,
+				},
+				"timestamp": {
+					KeyIDs:    []string{otherKey.ID()},
+					Threshold: 1,
+				},
+			},
+		},
+		Dirty: true,
+	}
+
+	signedRoot, err := root.ToSigned()
+	require.NoError(t, err)
+	err = signed.Sign(cs, signedRoot, []data.PublicKey{ecdsax509Key}, 1, nil)
+	require.NoError(t, err)
+
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	defer os.RemoveAll(tempBaseDir)
+	require.NoError(t, err, "failed to create a temporary directory: %s", err)
+
+	_, err = trustpinning.ValidateRoot(
+		nil,
+		signedRoot,
+		"docker.io/notary/test",
+		trustpinning.TrustPinConfig{},
+	)
+	require.Error(t, err, "failed to invalidate expired intermediate certificate")
 }

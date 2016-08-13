@@ -57,7 +57,7 @@ func (st *MemStorage) UpdateCurrent(gun string, update MetaUpdate) error {
 	if space, ok := st.tufMeta[id]; ok {
 		for _, v := range space {
 			if v.version >= update.Version {
-				return &ErrOldVersion{}
+				return ErrOldVersion{}
 			}
 		}
 	}
@@ -88,7 +88,7 @@ func (st *MemStorage) UpdateMany(gun string, updates []MetaUpdate) error {
 
 		// prevent duplicate versions of the same role
 		if _, ok := versioner[u.Role][u.Version]; ok {
-			return &ErrOldVersion{}
+			return ErrOldVersion{}
 		}
 		if _, ok := versioner[u.Role]; !ok {
 			versioner[u.Role] = make(map[int]struct{})
@@ -98,7 +98,7 @@ func (st *MemStorage) UpdateMany(gun string, updates []MetaUpdate) error {
 		if space, ok := st.tufMeta[id]; ok {
 			for _, v := range space {
 				if v.version >= u.Version {
-					return &ErrOldVersion{}
+					return ErrOldVersion{}
 				}
 			}
 		}
@@ -155,42 +155,6 @@ func (st *MemStorage) Delete(gun string) error {
 		}
 	}
 	delete(st.checksums, gun)
-	return nil
-}
-
-// GetKey returns the public key material of the timestamp key of a given gun
-func (st *MemStorage) GetKey(gun, role string) (algorithm string, public []byte, err error) {
-	// no need for lock. It's ok to return nil if an update
-	// wasn't observed
-	g, ok := st.keys[gun]
-	if !ok {
-		return "", nil, &ErrNoKey{gun: gun}
-	}
-	k, ok := g[role]
-	if !ok {
-		return "", nil, &ErrNoKey{gun: gun}
-	}
-
-	return k.algorithm, k.public, nil
-}
-
-// SetKey sets a key under a gun and role
-func (st *MemStorage) SetKey(gun, role, algorithm string, public []byte) error {
-	k := &key{algorithm: algorithm, public: public}
-	st.lock.Lock()
-	defer st.lock.Unlock()
-
-	// we hold the lock so nothing will be able to race to write a key
-	// between checking and setting
-	_, _, err := st.GetKey(gun, role)
-	if _, ok := err.(*ErrNoKey); !ok {
-		return &ErrKeyExists{gun: gun, role: role}
-	}
-	_, ok := st.keys[gun]
-	if !ok {
-		st.keys[gun] = make(map[string]*key)
-	}
-	st.keys[gun][role] = k
 	return nil
 }
 

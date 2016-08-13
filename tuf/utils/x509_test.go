@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"io/ioutil"
 	"strings"
@@ -85,15 +86,15 @@ func TestKeyOperations(t *testing.T) {
 	rsaKey, err := GenerateRSAKey(rand.Reader, 512)
 
 	// Encode our ED private key
-	edPEM, err := KeyToPEM(edKey, "root")
+	edPEM, err := KeyToPEM(edKey, data.CanonicalRootRole)
 	require.NoError(t, err)
 
 	// Encode our EC private key
-	ecPEM, err := KeyToPEM(ecKey, "root")
+	ecPEM, err := KeyToPEM(ecKey, data.CanonicalRootRole)
 	require.NoError(t, err)
 
 	// Encode our RSA private key
-	rsaPEM, err := KeyToPEM(rsaKey, "root")
+	rsaPEM, err := KeyToPEM(rsaKey, data.CanonicalRootRole)
 	require.NoError(t, err)
 
 	// Check to see if ED key it is encoded
@@ -124,31 +125,34 @@ func TestKeyOperations(t *testing.T) {
 	require.Equal(t, rsaKey.Private(), decodedRSAKey.Private())
 
 	// Encrypt our ED Key
-	encryptedEDKey, err := EncryptPrivateKey(edKey, "root", "ponies")
+	encryptedEDKey, err := EncryptPrivateKey(edKey, data.CanonicalRootRole, "", "ponies")
 	require.NoError(t, err)
 
 	// Encrypt our EC Key
-	encryptedECKey, err := EncryptPrivateKey(ecKey, "root", "ponies")
+	encryptedECKey, err := EncryptPrivateKey(ecKey, data.CanonicalRootRole, "", "ponies")
 	require.NoError(t, err)
 
 	// Encrypt our RSA Key
-	encryptedRSAKey, err := EncryptPrivateKey(rsaKey, "root", "ponies")
+	encryptedRSAKey, err := EncryptPrivateKey(rsaKey, data.CanonicalRootRole, "", "ponies")
 	require.NoError(t, err)
 
 	// Check to see if ED key it is encrypted
 	stringEncryptedEDKey := string(encryptedEDKey)
 	require.True(t, strings.Contains(stringEncryptedEDKey, "-----BEGIN ED25519 PRIVATE KEY-----"))
 	require.True(t, strings.Contains(stringEncryptedEDKey, "Proc-Type: 4,ENCRYPTED"))
+	require.True(t, strings.Contains(stringEncryptedEDKey, "role: root"))
 
 	// Check to see if EC key it is encrypted
 	stringEncryptedECKey := string(encryptedECKey)
 	require.True(t, strings.Contains(stringEncryptedECKey, "-----BEGIN EC PRIVATE KEY-----"))
 	require.True(t, strings.Contains(stringEncryptedECKey, "Proc-Type: 4,ENCRYPTED"))
+	require.True(t, strings.Contains(stringEncryptedECKey, "role: root"))
 
 	// Check to see if RSA key it is encrypted
 	stringEncryptedRSAKey := string(encryptedRSAKey)
 	require.True(t, strings.Contains(stringEncryptedRSAKey, "-----BEGIN RSA PRIVATE KEY-----"))
 	require.True(t, strings.Contains(stringEncryptedRSAKey, "Proc-Type: 4,ENCRYPTED"))
+	require.True(t, strings.Contains(stringEncryptedRSAKey, "role: root"))
 
 	// Decrypt our ED Key
 	decryptedEDKey, err := ParsePEMPrivateKey(encryptedEDKey, "ponies")
@@ -165,6 +169,19 @@ func TestKeyOperations(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, rsaKey.Private(), decryptedRSAKey.Private())
 
+	// quick test that gun headers are being added appropriately
+	// Encrypt our RSA Key, one type of key should be enough since headers are treated the same
+	testGunKey, err := EncryptPrivateKey(rsaKey, data.CanonicalRootRole, "ilove", "ponies")
+	require.NoError(t, err)
+
+	testNoGunKey, err := EncryptPrivateKey(rsaKey, data.CanonicalRootRole, "", "ponies")
+	require.NoError(t, err)
+
+	stringTestGunKey := string(testGunKey)
+	require.True(t, strings.Contains(stringTestGunKey, "gun: ilove"))
+
+	stringTestNoGunKey := string(testNoGunKey)
+	require.False(t, strings.Contains(stringTestNoGunKey, "gun:"))
 }
 
 // X509PublickeyID returns the public key ID of a RSA X509 key rather than the
@@ -219,4 +236,98 @@ func TestECDSAX509PublickeyID(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, tufPrivKey.ID(), tufID)
+}
+
+func TestValidateCertificateWithSHA1(t *testing.T) {
+	// Test against SHA1 signature algorithm cert first
+	startTime := time.Now()
+	template, err := NewCertificate("something", startTime, startTime.AddDate(10, 0, 0))
+	require.NoError(t, err)
+	// SHA1 signature algorithm is invalid
+	template.SignatureAlgorithm = x509.ECDSAWithSHA1
+	template.PublicKeyAlgorithm = x509.ECDSA
+
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, template, &privKey.PublicKey, privKey)
+	require.NoError(t, err)
+
+	sha1Cert, err := x509.ParseCertificate(derBytes)
+	require.NoError(t, err)
+
+	// Regardless of expiry check, this certificate should fail to validate
+	require.Error(t, ValidateCertificate(sha1Cert, false))
+	require.Error(t, ValidateCertificate(sha1Cert, true))
+}
+
+func TestValidateCertificateWithExpiredCert(t *testing.T) {
+	// Test against an expired cert for 10 years ago, only valid for a day
+	startTime := time.Now().AddDate(-10, 0, 0)
+	template, err := NewCertificate("something", startTime, startTime.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	template.SignatureAlgorithm = x509.ECDSAWithSHA256
+	template.PublicKeyAlgorithm = x509.ECDSA
+
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, template, &privKey.PublicKey, privKey)
+	require.NoError(t, err)
+
+	expiredCert, err := x509.ParseCertificate(derBytes)
+	require.NoError(t, err)
+
+	// If we don't check expiry, this cert is perfectly valid
+	require.NoError(t, ValidateCertificate(expiredCert, false))
+	// We should get an error when we check expiry
+	require.Error(t, ValidateCertificate(expiredCert, true))
+}
+
+func TestValidateCertificateWithInvalidExpiry(t *testing.T) {
+	// Test against a cert with an invalid expiry window: from 10 years in the future to 10 years ago
+	startTime := time.Now().AddDate(10, 0, 0)
+	template, err := NewCertificate("something", startTime, startTime.AddDate(-10, 0, 0))
+	require.NoError(t, err)
+	template.SignatureAlgorithm = x509.ECDSAWithSHA256
+	template.PublicKeyAlgorithm = x509.ECDSA
+
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, template, &privKey.PublicKey, privKey)
+	require.NoError(t, err)
+
+	invalidCert, err := x509.ParseCertificate(derBytes)
+	require.NoError(t, err)
+
+	// Regardless of expiry check, this certificate should fail to validate
+	require.Error(t, ValidateCertificate(invalidCert, false))
+	require.Error(t, ValidateCertificate(invalidCert, true))
+}
+
+func TestValidateCertificateWithShortKey(t *testing.T) {
+	startTime := time.Now()
+	template, err := NewCertificate("something", startTime, startTime.AddDate(10, 0, 0))
+	require.NoError(t, err)
+	template.SignatureAlgorithm = x509.SHA256WithRSA
+	template.PublicKeyAlgorithm = x509.RSA
+
+	// Use only 1024 bit modulus, this will fail
+	weakPrivKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, template, &weakPrivKey.PublicKey, weakPrivKey)
+	require.NoError(t, err)
+
+	weakKeyCert, err := x509.ParseCertificate(derBytes)
+	require.NoError(t, err)
+
+	// Regardless of expiry check, this certificate should fail to validate
+	require.Error(t, ValidateCertificate(weakKeyCert, false))
+	require.Error(t, ValidateCertificate(weakKeyCert, true))
 }

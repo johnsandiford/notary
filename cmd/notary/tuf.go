@@ -89,6 +89,12 @@ var cmdWitnessTemplate = usageTemplate{
 	Long:  "Marks roles to be re-signed the next time they're published. Currently will always bump version and expiry for role. N.B. behaviour may change when thresholding is introduced.",
 }
 
+var cmdTUFDeleteTemplate = usageTemplate{
+	Use:   "delete [ GUN ]",
+	Short: "Deletes all content for a trusted collection",
+	Long:  "Deletes all local content for a trusted collection identified by the Globally Unique Name. Remote data can also be deleted with an additional flag.",
+}
+
 type tufCommander struct {
 	// these need to be set
 	configGetter func() (*viper.Viper, error)
@@ -107,11 +113,16 @@ type tufCommander struct {
 	deleteIdx         []int
 	reset             bool
 	archiveChangelist string
+
+	deleteRemote bool
+
+	autoPublish bool
 }
 
 func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 	cmdTUFInit := cmdTUFInitTemplate.ToCommand(t.tufInit)
 	cmdTUFInit.Flags().StringVar(&t.rootKey, "rootkey", "", "Root key to initialize the repository with")
+	cmdTUFInit.Flags().BoolVarP(&t.autoPublish, "publish", "p", false, htAutoPublish)
 	cmd.AddCommand(cmdTUFInit)
 
 	cmdStatus := cmdTUFStatusTemplate.ToCommand(t.tufStatus)
@@ -129,16 +140,19 @@ func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 
 	cmdTUFAdd := cmdTUFAddTemplate.ToCommand(t.tufAdd)
 	cmdTUFAdd.Flags().StringSliceVarP(&t.roles, "roles", "r", nil, "Delegation roles to add this target to")
+	cmdTUFAdd.Flags().BoolVarP(&t.autoPublish, "publish", "p", false, htAutoPublish)
 	cmd.AddCommand(cmdTUFAdd)
 
 	cmdTUFRemove := cmdTUFRemoveTemplate.ToCommand(t.tufRemove)
 	cmdTUFRemove.Flags().StringSliceVarP(&t.roles, "roles", "r", nil, "Delegation roles to remove this target from")
+	cmdTUFRemove.Flags().BoolVarP(&t.autoPublish, "publish", "p", false, htAutoPublish)
 	cmd.AddCommand(cmdTUFRemove)
 
 	cmdTUFAddHash := cmdTUFAddHashTemplate.ToCommand(t.tufAddByHash)
 	cmdTUFAddHash.Flags().StringSliceVarP(&t.roles, "roles", "r", nil, "Delegation roles to add this target to")
 	cmdTUFAddHash.Flags().StringVar(&t.sha256, notary.SHA256, "", "hex encoded sha256 of the target to add")
 	cmdTUFAddHash.Flags().StringVar(&t.sha512, notary.SHA512, "", "hex encoded sha512 of the target to add")
+	cmdTUFAddHash.Flags().BoolVarP(&t.autoPublish, "publish", "p", false, htAutoPublish)
 	cmd.AddCommand(cmdTUFAddHash)
 
 	cmdTUFVerify := cmdTUFVerifyTemplate.ToCommand(t.tufVerify)
@@ -149,6 +163,10 @@ func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 
 	cmdWitness := cmdWitnessTemplate.ToCommand(t.tufWitness)
 	cmd.AddCommand(cmdWitness)
+
+	cmdTUFDeleteGUN := cmdTUFDeleteTemplate.ToCommand(t.tufDeleteGUN)
+	cmdTUFDeleteGUN.Flags().BoolVar(&t.deleteRemote, "remote", false, "Delete remote data for GUN in addition to local cache")
+	cmd.AddCommand(cmdTUFDeleteGUN)
 }
 
 func (t *tufCommander) tufWitness(cmd *cobra.Command, args []string) error {
@@ -257,7 +275,8 @@ func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 	cmd.Printf(
 		"Addition of target \"%s\" by %s hash to repository \"%s\" staged for next publish.\n",
 		targetName, strings.Join(hashesUsed, ", "), gun)
-	return nil
+
+	return maybeAutoPublish(cmd, t.autoPublish, gun, config, t.retriever)
 }
 
 func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
@@ -295,10 +314,45 @@ func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
 	if err = nRepo.AddTarget(target, t.roles...); err != nil {
 		return err
 	}
-	cmd.Printf(
-		"Addition of target \"%s\" to repository \"%s\" staged for next publish.\n",
-		targetName, gun)
-	return nil
+
+	cmd.Printf("Addition of target \"%s\" to repository \"%s\" staged for next publish.\n", targetName, gun)
+
+	return maybeAutoPublish(cmd, t.autoPublish, gun, config, t.retriever)
+}
+
+func (t *tufCommander) tufDeleteGUN(cmd *cobra.Command, args []string) error {
+	if len(args) < 1 {
+		cmd.Usage()
+		return fmt.Errorf("Must specify a GUN")
+	}
+	config, err := t.configGetter()
+	if err != nil {
+		return err
+	}
+
+	gun := args[0]
+
+	trustPin, err := getTrustPinning(config)
+
+	// Only initialize a roundtripper if we get the remote flag
+	var rt http.RoundTripper
+	if t.deleteRemote {
+		rt, err = getTransport(config, gun, admin)
+		if err != nil {
+			return err
+		}
+	}
+
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
+
+	if err != nil {
+		return err
+	}
+
+	cmd.Printf("Deleting trust data for repository %s.\n", gun)
+
+	return nRepo.DeleteTrustData(t.deleteRemote)
 }
 
 func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
@@ -349,12 +403,12 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	if len(rootKeyList) < 1 {
 		cmd.Println("No root keys found. Generating a new root key...")
 		rootPublicKey, err := nRepo.CryptoService.Create(data.CanonicalRootRole, "", data.ECDSAKey)
-		rootKeyID = rootPublicKey.ID()
 		if err != nil {
 			return err
 		}
+		rootKeyID = rootPublicKey.ID()
 	} else {
-		// Choses the first root key available, which is initialization specific
+		// Chooses the first root key available, which is initialization specific
 		// but should return the HW one first.
 		rootKeyID = rootKeyList[0]
 		cmd.Printf("Root key found, using: %s\n", rootKeyID)
@@ -363,7 +417,8 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	if err = nRepo.Initialize([]string{rootKeyID}); err != nil {
 		return err
 	}
-	return nil
+
+	return maybeAutoPublish(cmd, t.autoPublish, gun, config, t.retriever)
 }
 
 // Attempt to read an encrypted root key from a file, and return it as a data.PrivateKey
@@ -593,7 +648,8 @@ func (t *tufCommander) tufRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	cmd.Printf("Removal of %s from %s staged for next publish.\n", targetName, gun)
-	return nil
+
+	return maybeAutoPublish(cmd, t.autoPublish, gun, config, t.retriever)
 }
 
 func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
@@ -663,14 +719,16 @@ func (ps passwordStore) Basic(u *url.URL) (string, string) {
 
 	username := strings.TrimSpace(string(userIn))
 
-	if term.IsTerminal(0) {
-		state, err := term.SaveState(0)
+	// If typing on the terminal, we do not want the terminal to echo the
+	// password that is typed (so it doesn't display)
+	if term.IsTerminal(os.Stdin.Fd()) {
+		state, err := term.SaveState(os.Stdin.Fd())
 		if err != nil {
 			logrus.Errorf("error saving terminal state, cannot retrieve password: %s", err)
 			return "", ""
 		}
-		term.DisableEcho(0, state)
-		defer term.RestoreTerminal(0, state)
+		term.DisableEcho(os.Stdin.Fd(), state)
+		defer term.RestoreTerminal(os.Stdin.Fd(), state)
 	}
 
 	fmt.Fprintf(os.Stdout, "Enter password: ")
@@ -879,4 +937,31 @@ func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// Return the last response
 	return resp, nil
+}
+
+func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun string, config *viper.Viper, passRetriever notary.PassRetriever) error {
+
+	if !doPublish {
+		return nil
+	}
+
+	// We need to set up a http RoundTripper when publishing
+	rt, err := getTransport(config, gun, readWrite)
+	if err != nil {
+		return err
+	}
+
+	trustPin, err := getTrustPinning(config)
+	if err != nil {
+		return err
+	}
+
+	nRepo, err := notaryclient.NewNotaryRepository(
+		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, passRetriever, trustPin)
+	if err != nil {
+		return err
+	}
+
+	cmd.Println("Auto-publishing changes to", gun)
+	return nRepo.Publish()
 }
