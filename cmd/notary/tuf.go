@@ -16,11 +16,11 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/distribution/registry/client/transport"
-	"github.com/docker/docker/pkg/term"
 	"github.com/docker/go-connections/tlsconfig"
 	"github.com/docker/notary"
 	notaryclient "github.com/docker/notary/client"
 	"github.com/docker/notary/cryptoservice"
+	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/trustmanager"
 	"github.com/docker/notary/trustpinning"
 	"github.com/docker/notary/tuf/data"
@@ -206,6 +206,34 @@ func (t *tufCommander) tufWitness(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func getTargetHashes(t *tufCommander) (data.Hashes, error) {
+	targetHash := data.Hashes{}
+
+	if t.sha256 != "" {
+		if len(t.sha256) != notary.Sha256HexSize {
+			return nil, fmt.Errorf("invalid sha256 hex contents provided")
+		}
+		sha256Hash, err := hex.DecodeString(t.sha256)
+		if err != nil {
+			return nil, err
+		}
+		targetHash[notary.SHA256] = sha256Hash
+	}
+
+	if t.sha512 != "" {
+		if len(t.sha512) != notary.Sha512HexSize {
+			return nil, fmt.Errorf("invalid sha512 hex contents provided")
+		}
+		sha512Hash, err := hex.DecodeString(t.sha512)
+		if err != nil {
+			return nil, err
+		}
+		targetHash[notary.SHA512] = sha512Hash
+	}
+
+	return targetHash, nil
+}
+
 func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 	if len(args) < 3 || t.sha256 == "" && t.sha512 == "" {
 		cmd.Usage()
@@ -238,30 +266,13 @@ func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	targetHash := data.Hashes{}
-	if t.sha256 != "" {
-		if len(t.sha256) != notary.Sha256HexSize {
-			return fmt.Errorf("invalid sha256 hex contents provided")
-		}
-		sha256Hash, err := hex.DecodeString(t.sha256)
-		if err != nil {
-			return err
-		}
-		targetHash[notary.SHA256] = sha256Hash
-	}
-	if t.sha512 != "" {
-		if len(t.sha512) != notary.Sha512HexSize {
-			return fmt.Errorf("invalid sha512 hex contents provided")
-		}
-		sha512Hash, err := hex.DecodeString(t.sha512)
-		if err != nil {
-			return err
-		}
-		targetHash[notary.SHA512] = sha512Hash
+	targetHashes, err := getTargetHashes(t)
+	if err != nil {
+		return err
 	}
 
 	// Manually construct the target with the given byte size and hashes
-	target := &notaryclient.Target{Name: targetName, Hashes: targetHash, Length: targetInt64Len}
+	target := &notaryclient.Target{Name: targetName, Hashes: targetHashes, Length: targetInt64Len}
 
 	// If roles is empty, we default to adding to targets
 	if err = nRepo.AddTarget(target, t.roles...); err != nil {
@@ -269,7 +280,7 @@ func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 	}
 	// Include the hash algorithms we're using for pretty printing
 	hashesUsed := []string{}
-	for hashName := range targetHash {
+	for hashName := range targetHashes {
 		hashesUsed = append(hashesUsed, hashName)
 	}
 	cmd.Printf(
@@ -719,27 +730,14 @@ func (ps passwordStore) Basic(u *url.URL) (string, string) {
 
 	username := strings.TrimSpace(string(userIn))
 
-	// If typing on the terminal, we do not want the terminal to echo the
-	// password that is typed (so it doesn't display)
-	if term.IsTerminal(os.Stdin.Fd()) {
-		state, err := term.SaveState(os.Stdin.Fd())
-		if err != nil {
-			logrus.Errorf("error saving terminal state, cannot retrieve password: %s", err)
-			return "", ""
-		}
-		term.DisableEcho(os.Stdin.Fd(), state)
-		defer term.RestoreTerminal(os.Stdin.Fd(), state)
-	}
-
 	fmt.Fprintf(os.Stdout, "Enter password: ")
-
-	userIn, err = stdin.ReadBytes('\n')
+	passphrase, err := passphrase.GetPassphrase(stdin)
 	fmt.Fprintln(os.Stdout)
 	if err != nil {
 		logrus.Errorf("error processing password input: %s", err)
 		return "", ""
 	}
-	password := strings.TrimSpace(string(userIn))
+	password := strings.TrimSpace(string(passphrase))
 
 	return username, password
 }
