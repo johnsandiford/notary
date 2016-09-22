@@ -37,9 +37,8 @@ _empty :=
 _space := $(empty) $(empty)
 
 # go cover test variables
-COVERDIR=.cover
-COVERPROFILE?=$(COVERDIR)/cover.out
-COVERMODE=count
+COVERPROFILE?=coverage.txt
+COVERMODE=atomic
 PKGS ?= $(shell go list -tags "${NOTARY_BUILDTAGS}" ./... | grep -v /vendor/ | tr '\n' ' ')
 
 .PHONY: clean all lint build test binaries cross cover docker-images notary-dockerfile
@@ -143,8 +142,7 @@ protos:
 # be run first
 gen-cover:
 gen-cover:
-	@mkdir -p "$(COVERDIR)"
-	python -u buildscripts/covertest.py --coverdir "$(COVERDIR)" --tags "$(NOTARY_BUILDTAGS)" --pkgs="$(PKGS)" --testopts="${TESTOPTS}"
+	@python -u buildscripts/covertest.py --tags "$(NOTARY_BUILDTAGS)" --pkgs="$(PKGS)" --testopts="${TESTOPTS}" --debug
 
 # Generates the cover binaries and runs them all in serial, so this can be used
 # run all tests with a yubikey without any problems
@@ -161,7 +159,7 @@ yubikey-tests: override PKGS = github.com/docker/notary/cmd/notary github.com/do
 yubikey-tests: ci
 
 covmerge:
-	@gocovmerge $(shell ls -1 $(COVERDIR)/* | tr "\n" " ") > $(COVERPROFILE)
+	@gocovmerge $(shell find . -name coverage*.txt | tr "\n" " ") > $(COVERPROFILE)
 	@go tool cover -func="$(COVERPROFILE)"
 
 clean-protos:
@@ -192,10 +190,10 @@ shell: notary-dockerfile
 
 cross: notary-dockerfile
 	@rm -rf $(CURDIR)/cross
-	docker run --rm -v $(CURDIR)/cross:$(NOTARYDIR)/cross -e NOTARY_BUILDTAGS=$(NOTARY_BUILDTAGS) notary buildscripts/cross.sh $(GOOSES)
-
+	docker run --rm -v $(CURDIR)/cross:$(NOTARYDIR)/cross -e CTIMEVAR="${CTIMEVAR}" -e NOTARY_BUILDTAGS=$(NOTARY_BUILDTAGS) notary buildscripts/cross.sh $(GOOSES)
 
 clean:
 	@echo "+ $@"
-	@rm -rf "$(COVERDIR)" cross
+	@rm -rf .cover cross
+	find . -name coverage.txt -delete
 	@rm -rf "${PREFIX}/bin/notary-server" "${PREFIX}/bin/notary" "${PREFIX}/bin/notary-signer"

@@ -26,10 +26,10 @@ func TestImportWithYubikey(t *testing.T) {
 		t.Skip("Must have Yubikey access.")
 	}
 	setUp(t)
-	tempBaseDir, err := ioutil.TempDir("/tmp", "notary-test-")
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
 	require.NoError(t, err)
 	defer os.RemoveAll(tempBaseDir)
-	input, err := ioutil.TempFile("/tmp", "notary-test-import-")
+	input, err := ioutil.TempFile("", "notary-test-import-")
 	require.NoError(t, err)
 	defer os.RemoveAll(input.Name())
 	k := &keyCommander{
@@ -48,8 +48,7 @@ func TestImportWithYubikey(t *testing.T) {
 	pubK, err := cs.Create(data.CanonicalRootRole, "ankh", data.ECDSAKey)
 	require.NoError(t, err)
 	bID := pubK.ID() // need to check presence in yubikey later
-	require.NoError(t, err)
-	bytes, err := memStore.Get(notary.RootKeysSubdir + "/" + pubK.ID())
+	bytes, err := memStore.Get(pubK.ID())
 	require.NoError(t, err)
 	b, _ := pem.Decode(bytes)
 	b.Headers["path"] = "ankh"
@@ -58,7 +57,7 @@ func TestImportWithYubikey(t *testing.T) {
 	pubK, err = cs.Create(data.CanonicalTargetsRole, "morpork", data.ECDSAKey)
 	require.NoError(t, err)
 	cID := pubK.ID()
-	bytes, err = memStore.Get(notary.NonRootKeysSubdir + "/morpork/" + pubK.ID())
+	bytes, err = memStore.Get(pubK.ID())
 	require.NoError(t, err)
 	c, _ := pem.Decode(bytes)
 	c.Headers["path"] = "morpork"
@@ -99,7 +98,7 @@ func TestGetImporters(t *testing.T) {
 	if !yubikey.IsAccessible() {
 		t.Skip("Must have Yubikey access.")
 	}
-	tempBaseDir, err := ioutil.TempDir("/tmp", "notary-test-")
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
 	require.NoError(t, err)
 	defer os.RemoveAll(tempBaseDir)
 	importers, err := getImporters(tempBaseDir, passphrase.ConstantRetriever("pass"))
