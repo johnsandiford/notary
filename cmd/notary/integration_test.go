@@ -66,9 +66,9 @@ func runCommand(t *testing.T, tempDir string, args ...string) (string, error) {
 }
 
 func setupServerHandler(metaStore storage.MetaStore) http.Handler {
-	ctx := context.WithValue(context.Background(), "metaStore", metaStore)
+	ctx := context.WithValue(context.Background(), notary.CtxKeyMetaStore, metaStore)
 
-	ctx = context.WithValue(ctx, "keyAlgorithm", data.ECDSAKey)
+	ctx = context.WithValue(ctx, notary.CtxKeyKeyAlgo, data.ECDSAKey)
 
 	// Eat the logs instead of spewing them out
 	var b bytes.Buffer
@@ -77,7 +77,7 @@ func setupServerHandler(metaStore storage.MetaStore) http.Handler {
 	ctx = ctxu.WithLogger(ctx, logrus.NewEntry(l))
 
 	cryptoService := cryptoservice.NewCryptoService(trustmanager.NewKeyMemoryStore(passphrase.ConstantRetriever("pass")))
-	return server.RootHandler(nil, ctx, cryptoService, nil, nil, nil)
+	return server.RootHandler(ctx, nil, cryptoService, nil, nil, nil)
 }
 
 // makes a testing notary-server
@@ -1477,6 +1477,8 @@ func TestPurgeSingleKey(t *testing.T) {
 //  11. witness an invalid role and check for error on publish
 //  12. check non-targets base roles all fail
 //  13. test auto-publish functionality
+//  14. remove all keys from the delegation and publish
+//  15. witnessing the delegation should now fail
 func TestWitness(t *testing.T) {
 	setUp(t)
 
@@ -1643,6 +1645,12 @@ func TestWitness(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, output, targetName)
 	require.Contains(t, output, targetHash)
+
+	_, err = runCommand(t, tempDir, "-s", server.URL, "delegation", "remove", "-p", "gun", delgName, keyID, keyID2)
+	require.NoError(t, err)
+	_, err = runCommand(t, tempDir, "-s", server.URL, "witness", "-p", "gun", delgName)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "role does not specify enough valid signing keys to meet its required threshold")
 }
 
 func generateCertPrivKeyPair(t *testing.T, gun, keyAlgorithm string) (*x509.Certificate, data.PrivateKey, string) {
@@ -2155,7 +2163,7 @@ func TestClientKeyImport(t *testing.T) {
 	// if there is hardware available, root will only be on hardware, and not
 	// on disk
 	assertNumKeys(t, tempDir, 2, 1, !rootOnHardware())
-	file, err := os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+	file, err := os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	filebytes, _ := ioutil.ReadAll(file)
 	require.Contains(t, string(filebytes), ("role: " + notary.DefaultImportRole))
@@ -2185,7 +2193,7 @@ func TestClientKeyImport(t *testing.T) {
 	// if there is hardware available, root will only be on hardware, and not
 	// on disk
 	assertNumKeys(t, tempDir, 2, 2, !rootOnHardware())
-	file, err = os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+	file, err = os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	filebytes, _ = ioutil.ReadAll(file)
 	require.Contains(t, string(filebytes), ("role: " + "somerole"))
@@ -2216,7 +2224,7 @@ func TestClientKeyImport(t *testing.T) {
 	// if there is hardware available, root will only be on hardware, and not
 	// on disk
 	assertNumKeys(t, tempDir, 2, 3, !rootOnHardware())
-	file, err = os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+	file, err = os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	filebytes, _ = ioutil.ReadAll(file)
 	require.Contains(t, string(filebytes), ("role: " + data.CanonicalSnapshotRole))
@@ -2273,7 +2281,7 @@ func TestClientKeyImport(t *testing.T) {
 	// if there is hardware available, root will only be on hardware, and not
 	// on disk
 	assertNumKeys(t, tempDir, 2, 4, !rootOnHardware())
-	file, err = os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+	file, err = os.OpenFile(filepath.Join(tempDir, notary.PrivDir, privKey.ID()+".key"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	filebytes, _ = ioutil.ReadAll(file)
 	require.Contains(t, string(filebytes), ("role: " + "somerole"))
@@ -2497,7 +2505,7 @@ func TestExportImportFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	// make sure the export has been done properly
-	from, err := os.OpenFile(filepath.Join(tempDir, "exported"), os.O_RDONLY, notary.PrivKeyPerms)
+	from, err := os.OpenFile(filepath.Join(tempDir, "exported"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	defer from.Close()
 	fromBytes, _ := ioutil.ReadAll(from)
@@ -2536,7 +2544,7 @@ func TestExportImportFlow(t *testing.T) {
 
 	if !rootOnHardware() {
 		// validate root is imported correctly
-		rootKey, err := os.OpenFile(filepath.Join(newTempDir, notary.PrivDir, root[0]+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+		rootKey, err := os.OpenFile(filepath.Join(newTempDir, notary.PrivDir, root[0]+".key"), os.O_RDONLY, notary.PrivExecPerms)
 		require.NoError(t, err)
 		defer rootKey.Close()
 		rootBytes, _ := ioutil.ReadAll(rootKey)
@@ -2547,7 +2555,7 @@ func TestExportImportFlow(t *testing.T) {
 	}
 
 	// validate snapshot is imported correctly
-	snapKey, err := os.OpenFile(filepath.Join(newTempDir, notary.PrivDir, signing[0]+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+	snapKey, err := os.OpenFile(filepath.Join(newTempDir, notary.PrivDir, signing[0]+".key"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	defer snapKey.Close()
 	snapBytes, _ := ioutil.ReadAll(snapKey)
@@ -2556,7 +2564,7 @@ func TestExportImportFlow(t *testing.T) {
 	require.True(t, strings.Contains(snapString, "role: snapshot") || strings.Contains(snapString, "role: target"))
 
 	// validate targets is imported correctly
-	targKey, err := os.OpenFile(filepath.Join(newTempDir, notary.PrivDir, signing[1]+".key"), os.O_RDONLY, notary.PrivKeyPerms)
+	targKey, err := os.OpenFile(filepath.Join(newTempDir, notary.PrivDir, signing[1]+".key"), os.O_RDONLY, notary.PrivExecPerms)
 	require.NoError(t, err)
 	defer targKey.Close()
 	targBytes, _ := ioutil.ReadAll(targKey)

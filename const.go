@@ -1,8 +1,6 @@
 package notary
 
 import (
-	"os"
-	"syscall"
 	"time"
 )
 
@@ -16,10 +14,6 @@ const (
 	MinRSABitSize = 2048
 	// MinThreshold requires a minimum of one threshold for roles; currently we do not support a higher threshold
 	MinThreshold = 1
-	// PrivKeyPerms are the file permissions to use when writing private keys to disk
-	PrivKeyPerms = 0700
-	// PubCertPerms are the file permissions to use when writing public certificates to disk
-	PubCertPerms = 0755
 	// Sha256HexSize is how big a Sha256 hex is in number of characters
 	Sha256HexSize = 64
 	// Sha512HexSize is how big a Sha512 hex is in number of characters
@@ -72,6 +66,19 @@ const (
 	HealthCheckKeyManagement = "grpc.health.v1.Health.KeyManagement"
 	HealthCheckSigner        = "grpc.health.v1.Health.Signer"
 	HealthCheckOverall       = "grpc.health.v1.Health.Overall"
+
+	// PrivExecPerms indicates the file permissions for directory
+	// and PrivNoExecPerms for file.
+	PrivExecPerms   = 0700
+	PrivNoExecPerms = 0600
+)
+
+// enum to use for setting and retrieving values from contexts
+const (
+	CtxKeyMetaStore CtxKey = iota
+	CtxKeyKeyAlgo
+	CtxKeyCryptoSvc
+	CtxKeyRepo
 )
 
 // NotaryDefaultExpiries is the construct used to configure the default expiry times of
@@ -81,14 +88,6 @@ var NotaryDefaultExpiries = map[string]time.Duration{
 	"targets":   NotaryTargetsExpiry,
 	"snapshot":  NotarySnapshotExpiry,
 	"timestamp": NotaryTimestampExpiry,
-}
-
-// NotarySupportedSignals contains the signals we would like to capture:
-// - SIGUSR1, indicates a increment of the log level.
-// - SIGUSR2, indicates a decrement of the log level.
-var NotarySupportedSignals = []os.Signal{
-	syscall.SIGUSR1,
-	syscall.SIGUSR2,
 }
 
 // NotarySupportedBackends contains the backends we would like to support at present

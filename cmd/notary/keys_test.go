@@ -317,12 +317,12 @@ func setUpRepo(t *testing.T, tempBaseDir, gun string, ret notary.PassRetriever) 
 
 	// Set up server
 	ctx := context.WithValue(
-		context.Background(), "metaStore", storage.NewMemStorage())
+		context.Background(), notary.CtxKeyMetaStore, storage.NewMemStorage())
 
 	// Do not pass one of the const KeyAlgorithms here as the value! Passing a
 	// string is in itself good test that we are handling it correctly as we
 	// will be receiving a string from the configuration.
-	ctx = context.WithValue(ctx, "keyAlgorithm", "ecdsa")
+	ctx = context.WithValue(ctx, notary.CtxKeyKeyAlgo, "ecdsa")
 
 	// Eat the logs instead of spewing them out
 	l := logrus.New()
@@ -330,9 +330,9 @@ func setUpRepo(t *testing.T, tempBaseDir, gun string, ret notary.PassRetriever) 
 	ctx = ctxu.WithLogger(ctx, logrus.NewEntry(l))
 
 	cryptoService := cryptoservice.NewCryptoService(trustmanager.NewKeyMemoryStore(ret))
-	ts := httptest.NewServer(server.RootHandler(nil, ctx, cryptoService, nil, nil, nil))
+	ts := httptest.NewServer(server.RootHandler(ctx, nil, cryptoService, nil, nil, nil))
 
-	repo, err := client.NewNotaryRepository(
+	repo, err := client.NewFileCachedNotaryRepository(
 		tempBaseDir, gun, ts.URL, http.DefaultTransport, ret, trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
@@ -375,7 +375,7 @@ func TestRotateKeyRemoteServerManagesKey(t *testing.T) {
 		}
 		require.NoError(t, k.keysRotate(&cobra.Command{}, []string{gun, role, "-r"}))
 
-		repo, err := client.NewNotaryRepository(tempBaseDir, gun, ts.URL, http.DefaultTransport, ret, trustpinning.TrustPinConfig{})
+		repo, err := client.NewFileCachedNotaryRepository(tempBaseDir, gun, ts.URL, http.DefaultTransport, ret, trustpinning.TrustPinConfig{})
 		require.NoError(t, err, "error creating repo: %s", err)
 
 		cl, err := repo.GetChangelist()
@@ -429,7 +429,7 @@ func TestRotateKeyBothKeys(t *testing.T) {
 	require.NoError(t, k.keysRotate(&cobra.Command{}, []string{gun, data.CanonicalTargetsRole}))
 	require.NoError(t, k.keysRotate(&cobra.Command{}, []string{gun, data.CanonicalSnapshotRole}))
 
-	repo, err := client.NewNotaryRepository(tempBaseDir, gun, ts.URL, nil, ret, trustpinning.TrustPinConfig{})
+	repo, err := client.NewFileCachedNotaryRepository(tempBaseDir, gun, ts.URL, nil, ret, trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
 	cl, err := repo.GetChangelist()
@@ -494,7 +494,7 @@ func TestRotateKeyRootIsInteractive(t *testing.T) {
 
 	require.Contains(t, out.String(), "Aborting action")
 
-	repo, err := client.NewNotaryRepository(tempBaseDir, gun, ts.URL, nil, ret, trustpinning.TrustPinConfig{})
+	repo, err := client.NewFileCachedNotaryRepository(tempBaseDir, gun, ts.URL, nil, ret, trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
 	// There should still just be one root key (and one targets and one snapshot)

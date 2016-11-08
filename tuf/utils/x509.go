@@ -252,9 +252,29 @@ func ParsePEMPublicKey(pubKeyBytes []byte) (data.PublicKey, error) {
 			return nil, fmt.Errorf("invalid certificate: %v", err)
 		}
 		return CertToKey(cert), nil
+	case "PUBLIC KEY":
+		keyType, err := keyTypeForPublicKey(pemBlock.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		return data.NewPublicKey(keyType, pemBlock.Bytes), nil
 	default:
-		return nil, fmt.Errorf("unsupported PEM block type %q, expected certificate", pemBlock.Type)
+		return nil, fmt.Errorf("unsupported PEM block type %q, expected CERTIFICATE or PUBLIC KEY", pemBlock.Type)
 	}
+}
+
+func keyTypeForPublicKey(pubKeyBytes []byte) (string, error) {
+	pub, err := x509.ParsePKIXPublicKey(pubKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("unable to parse pem encoded public key: %v", err)
+	}
+	switch pub.(type) {
+	case *ecdsa.PublicKey:
+		return data.ECDSAKey, nil
+	case *rsa.PublicKey:
+		return data.RSAKey, nil
+	}
+	return "", fmt.Errorf("unknown public key format")
 }
 
 // ValidateCertificate returns an error if the certificate is not valid for notary
@@ -463,19 +483,6 @@ func EncryptPrivateKey(key data.PrivateKey, role, gun, passphrase string) ([]byt
 	}
 
 	return pem.EncodeToMemory(encryptedPEMBlock), nil
-}
-
-// ReadRoleFromPEM returns the value from the role PEM header, if it exists
-func ReadRoleFromPEM(pemBytes []byte) string {
-	pemBlock, _ := pem.Decode(pemBytes)
-	if pemBlock == nil || pemBlock.Headers == nil {
-		return ""
-	}
-	role, ok := pemBlock.Headers["role"]
-	if !ok {
-		return ""
-	}
-	return role
 }
 
 // CertToKey transforms a single input certificate into its corresponding

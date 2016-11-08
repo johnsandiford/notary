@@ -31,7 +31,7 @@ func newBlankRepo(t *testing.T, url string) *NotaryRepository {
 	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
 	require.NoError(t, err, "failed to create a temporary directory: %s", err)
 
-	repo, err := NewNotaryRepository(tempBaseDir, "docker.com/notary", url,
+	repo, err := NewFileCachedNotaryRepository(tempBaseDir, "docker.com/notary", url,
 		http.DefaultTransport, passphrase.ConstantRetriever("pass"), trustpinning.TrustPinConfig{})
 	require.NoError(t, err)
 	return repo
@@ -106,12 +106,12 @@ func TestUpdateSucceedsEvenIfCannotWriteNewRepo(t *testing.T) {
 
 	for role := range serverMeta {
 		repo := newBlankRepo(t, ts.URL)
-		repo.fileStore = &unwritableStore{MetadataStore: repo.fileStore, roleToNotWrite: role}
+		repo.cache = &unwritableStore{MetadataStore: repo.cache, roleToNotWrite: role}
 		err := repo.Update(false)
 		require.NoError(t, err)
 
 		for r, expected := range serverMeta {
-			actual, err := repo.fileStore.GetSized(r, store.NoSizeLimit)
+			actual, err := repo.cache.GetSized(r, store.NoSizeLimit)
 			if r == role {
 				require.Error(t, err)
 				require.IsType(t, store.ErrMetaNotFound{}, err,
@@ -144,7 +144,7 @@ func TestUpdateSucceedsEvenIfCannotWriteExistingRepo(t *testing.T) {
 	err := repo.Update(false)
 	require.NoError(t, err)
 
-	origFileStore := repo.fileStore
+	origFileStore := repo.cache
 
 	for role := range serverMeta {
 		for _, forWrite := range []bool{true, false} {
@@ -152,13 +152,13 @@ func TestUpdateSucceedsEvenIfCannotWriteExistingRepo(t *testing.T) {
 			bumpVersions(t, serverSwizzler, 1)
 
 			// update fileStore
-			repo.fileStore = &unwritableStore{MetadataStore: origFileStore, roleToNotWrite: role}
+			repo.cache = &unwritableStore{MetadataStore: origFileStore, roleToNotWrite: role}
 			err := repo.Update(forWrite)
 
 			require.NoError(t, err)
 
 			for r, expected := range serverMeta {
-				actual, err := repo.fileStore.GetSized(r, store.NoSizeLimit)
+				actual, err := repo.cache.GetSized(r, store.NoSizeLimit)
 				require.NoError(t, err, "problem getting repo metadata for %s", r)
 				if role == r {
 					require.False(t, bytes.Equal(expected, actual),
@@ -170,6 +170,45 @@ func TestUpdateSucceedsEvenIfCannotWriteExistingRepo(t *testing.T) {
 			}
 		}
 	}
+}
+
+// If there is no local cache, update will error if it can't connect to the server.  Otherwise
+// it uses the local cache.
+func TestUpdateInOfflineMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	// invalid URL, no cache - errors
+	invalidURLRepo := newBlankRepo(t, "https://nothisdoesnotexist.com")
+	defer os.RemoveAll(invalidURLRepo.baseDir)
+	err := invalidURLRepo.Update(false)
+	require.Error(t, err)
+	require.IsType(t, store.NetworkError{}, err)
+
+	// offline client: no cache - errors
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	require.NoError(t, err, "failed to create a temporary directory: %s", err)
+	defer os.RemoveAll(tempBaseDir)
+
+	offlineRepo, err := NewFileCachedNotaryRepository(tempBaseDir, "docker.com/notary", "https://nope",
+		nil, passphrase.ConstantRetriever("pass"), trustpinning.TrustPinConfig{})
+	require.NoError(t, err)
+	err = offlineRepo.Update(false)
+	require.Error(t, err)
+	require.IsType(t, store.ErrOffline{}, err)
+
+	// set existing metadata on the repo
+	serverMeta, _, err := testutils.NewRepoMetadata("docker.com/notary", metadataDelegations...)
+	require.NoError(t, err)
+	for name, metaBytes := range serverMeta {
+		require.NoError(t, invalidURLRepo.cache.Set(name, metaBytes))
+		require.NoError(t, offlineRepo.cache.Set(name, metaBytes))
+	}
+
+	// both of these can read from cache and load repo
+	require.NoError(t, invalidURLRepo.Update(false))
+	require.NoError(t, offlineRepo.Update(false))
 }
 
 type swizzleFunc func(*testutils.MetadataSwizzler, string) error
@@ -226,7 +265,7 @@ func TestUpdateReplacesCorruptOrMissingMetadata(t *testing.T) {
 
 	// we want to swizzle the local cache, not the server, so create a new one
 	repoSwizzler := testutils.NewMetadataSwizzler("docker.com/notary", serverMeta, cs)
-	repoSwizzler.MetadataCache = repo.fileStore
+	repoSwizzler.MetadataCache = repo.cache
 
 	origMeta := testutils.CopyRepoMetadata(serverMeta)
 
@@ -244,12 +283,12 @@ func TestUpdateReplacesCorruptOrMissingMetadata(t *testing.T) {
 					require.Error(t, err, "%s for %s: expected to error when bootstrapping root", text, role)
 					// revert our original metadata
 					for role := range origMeta {
-						require.NoError(t, repo.fileStore.Set(role, origMeta[role]))
+						require.NoError(t, repo.cache.Set(role, origMeta[role]))
 					}
 				} else {
 					require.NoError(t, err)
 					for r, expected := range serverMeta {
-						actual, err := repo.fileStore.GetSized(r, store.NoSizeLimit)
+						actual, err := repo.cache.GetSized(r, store.NoSizeLimit)
 						require.NoError(t, err, "problem getting repo metadata for %s", role)
 						require.True(t, bytes.Equal(expected, actual),
 							"%s for %s: expected to recover after update", text, role)
@@ -289,7 +328,7 @@ func TestUpdateFailsIfServerRootKeyChangedWithoutMultiSign(t *testing.T) {
 
 	// we want to swizzle the local cache, not the server, so create a new one
 	repoSwizzler := &testutils.MetadataSwizzler{
-		MetadataCache: repo.fileStore,
+		MetadataCache: repo.cache,
 		CryptoService: serverSwizzler.CryptoService,
 		Roles:         serverSwizzler.Roles,
 	}
@@ -298,7 +337,7 @@ func TestUpdateFailsIfServerRootKeyChangedWithoutMultiSign(t *testing.T) {
 		text, messItUp := expt.desc, expt.swizzle
 		for _, forWrite := range []bool{true, false} {
 			require.NoError(t, messItUp(repoSwizzler, data.CanonicalRootRole), "could not fuzz root (%s)", text)
-			messedUpMeta, err := repo.fileStore.GetSized(data.CanonicalRootRole, store.NoSizeLimit)
+			messedUpMeta, err := repo.cache.GetSized(data.CanonicalRootRole, store.NoSizeLimit)
 
 			if _, ok := err.(store.ErrMetaNotFound); ok { // one of the ways to mess up is to delete metadata
 
@@ -307,7 +346,7 @@ func TestUpdateFailsIfServerRootKeyChangedWithoutMultiSign(t *testing.T) {
 				require.NoError(t, err)
 				// revert our original metadata
 				for role := range origMeta {
-					require.NoError(t, repo.fileStore.Set(role, origMeta[role]))
+					require.NoError(t, repo.cache.Set(role, origMeta[role]))
 				}
 			} else {
 
@@ -321,7 +360,7 @@ func TestUpdateFailsIfServerRootKeyChangedWithoutMultiSign(t *testing.T) {
 				// same because it has failed to update.
 				for role, expected := range origMeta {
 					if role != data.CanonicalTimestampRole && role != data.CanonicalSnapshotRole {
-						actual, err := repo.fileStore.GetSized(role, store.NoSizeLimit)
+						actual, err := repo.cache.GetSized(role, store.NoSizeLimit)
 						require.NoError(t, err, "problem getting repo metadata for %s", role)
 
 						if role == data.CanonicalRootRole {
@@ -336,7 +375,7 @@ func TestUpdateFailsIfServerRootKeyChangedWithoutMultiSign(t *testing.T) {
 
 			// revert our original root metadata
 			require.NoError(t,
-				repo.fileStore.Set(data.CanonicalRootRole, origMeta[data.CanonicalRootRole]))
+				repo.cache.Set(data.CanonicalRootRole, origMeta[data.CanonicalRootRole]))
 		}
 	}
 }
@@ -1255,13 +1294,21 @@ func testUpdateRemoteCorruptValidChecksum(t *testing.T, opts updateOpts, expt sw
 		}
 	}
 	err := repo.Update(opts.forWrite)
+	checkErrors(t, err, shouldErr, expt.expectErrs, msg)
+
+	if opts.checkRepo != nil {
+		opts.checkRepo(repo, serverSwizzler)
+	}
+}
+
+func checkErrors(t *testing.T, err error, shouldErr bool, expectedErrs []interface{}, msg string) {
 	if shouldErr {
 		require.Error(t, err, "expected failure updating when %s", msg)
 
 		errType := reflect.TypeOf(err)
 		isExpectedType := false
 		var expectedTypes []string
-		for _, expectErr := range expt.expectErrs {
+		for _, expectErr := range expectedErrs {
 			expectedType := reflect.TypeOf(expectErr)
 			isExpectedType = isExpectedType || errType == expectedType
 			expectedTypes = append(expectedTypes, expectedType.String())
@@ -1271,10 +1318,6 @@ func testUpdateRemoteCorruptValidChecksum(t *testing.T, opts updateOpts, expt sw
 
 	} else {
 		require.NoError(t, err, "expected no failure updating when %s", msg)
-	}
-
-	if opts.checkRepo != nil {
-		opts.checkRepo(repo, serverSwizzler)
 	}
 }
 
@@ -1305,7 +1348,7 @@ func testUpdateLocalAndRemoteRootCorrupt(t *testing.T, forWrite bool, localExpt,
 	require.NoError(t, err)
 	repoSwizzler := &testutils.MetadataSwizzler{
 		Gun:           serverSwizzler.Gun,
-		MetadataCache: repo.fileStore,
+		MetadataCache: repo.cache,
 		CryptoService: serverSwizzler.CryptoService,
 		Roles:         serverSwizzler.Roles,
 	}
@@ -1705,7 +1748,7 @@ func TestRootOnDiskTrustPinning(t *testing.T) {
 	defer os.RemoveAll(repo.baseDir)
 	repo.trustPinning = restrictiveTrustPinning
 	// put root on disk
-	require.NoError(t, repo.fileStore.Set(data.CanonicalRootRole, meta[data.CanonicalRootRole]))
+	require.NoError(t, repo.cache.Set(data.CanonicalRootRole, meta[data.CanonicalRootRole]))
 
 	require.NoError(t, repo.Update(false))
 }

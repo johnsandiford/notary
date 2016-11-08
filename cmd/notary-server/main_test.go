@@ -6,14 +6,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/health"
 	"github.com/docker/notary"
 	"github.com/docker/notary/server/storage"
@@ -290,7 +287,7 @@ func TestGetTrustServiceTLSFailure(t *testing.T) {
 
 // Just to ensure that errors are propagated
 func TestGetStoreInvalid(t *testing.T) {
-	config := `{"storage": {"backend": "asdf", "db_url": "doesnt_matter_what_value_this_is"}}`
+	config := `{"storage": {"backend": "asdf", "db_url": "does_not_matter_what_value_this_is"}}`
 
 	var registerCalled = 0
 
@@ -415,31 +412,4 @@ func TestSampleConfig(t *testing.T) {
 
 	// once for the DB, once for the trust service
 	require.Equal(t, registerCalled, 2)
-}
-
-func TestSignalHandle(t *testing.T) {
-	tempdir, err := ioutil.TempDir("", "test-signal-handle")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempdir)
-	f, err := os.Create(filepath.Join(tempdir, "testSignalHandle.json"))
-	require.NoError(t, err)
-
-	f.WriteString(`{"logging": {"level": "info"}}`)
-
-	v := viper.New()
-	utils.SetupViper(v, "envPrefix")
-	err = utils.ParseViper(v, f.Name())
-	require.NoError(t, err)
-
-	// Info + SIGUSR1 -> Debug
-	signalHandle(syscall.SIGUSR1)
-	require.Equal(t, logrus.GetLevel(), logrus.DebugLevel)
-
-	// Debug + SIGUSR1 -> Debug
-	signalHandle(syscall.SIGUSR1)
-	require.Equal(t, logrus.GetLevel(), logrus.DebugLevel)
-
-	// Debug + SIGUSR2-> Info
-	signalHandle(syscall.SIGUSR2)
-	require.Equal(t, logrus.GetLevel(), logrus.InfoLevel)
 }

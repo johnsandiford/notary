@@ -219,7 +219,7 @@ func (k *keyCommander) keysRotate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	nRepo, err := notaryclient.NewNotaryRepository(
+	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
 		config.GetString("trust_dir"), gun, getRemoteTrustServer(config),
 		rt, k.getRetriever(), trustPin)
 	if err != nil {
@@ -240,7 +240,11 @@ func (k *keyCommander) keysRotate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return nRepo.RotateKey(rotateKeyRole, k.rotateKeyServerManaged)
+	if err := nRepo.RotateKey(rotateKeyRole, k.rotateKeyServerManaged); err != nil {
+		return err
+	}
+	cmd.Printf("Successfully rotated %s key for repository %s\n", rotateKeyRole, gun)
+	return nil
 }
 
 func removeKeyInteractively(keyStores []trustmanager.KeyStore, keyID string,
@@ -413,7 +417,7 @@ func (k *keyCommander) importKeys(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	for _, file := range args {
-		from, err := os.OpenFile(file, os.O_RDONLY, notary.PrivKeyPerms)
+		from, err := os.OpenFile(file, os.O_RDONLY, notary.PrivExecPerms)
 		if err != nil {
 			return err
 		}
@@ -442,7 +446,7 @@ func (k *keyCommander) exportKeys(cmd *cobra.Command, args []string) error {
 	if k.outFile == "" {
 		out = cmd.Out()
 	} else {
-		f, err := os.OpenFile(k.outFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, notary.PrivKeyPerms)
+		f, err := os.OpenFile(k.outFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, notary.PrivExecPerms)
 		if err != nil {
 			return err
 		}
