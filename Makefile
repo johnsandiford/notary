@@ -78,15 +78,16 @@ ${PREFIX}/bin/static/notary:
 else
 ${PREFIX}/bin/static/notary-server: NOTARY_VERSION $(shell find . -type f -name '*.go')
 	@echo "+ $@"
-	@go build -tags ${NOTARY_BUILDTAGS} -o $@ ${GO_LDFLAGS_STATIC} ./cmd/notary-server
+	@(export CGO_ENABLED=0; go build -tags ${NOTARY_BUILDTAGS} -o $@ ${GO_LDFLAGS_STATIC} ./cmd/notary-server)
 
 ${PREFIX}/bin/static/notary-signer: NOTARY_VERSION $(shell find . -type f -name '*.go')
 	@echo "+ $@"
-	@go build -tags ${NOTARY_BUILDTAGS} -o $@ ${GO_LDFLAGS_STATIC} ./cmd/notary-signer
+	@(export CGO_ENABLED=0; go build -tags ${NOTARY_BUILDTAGS} -o $@ ${GO_LDFLAGS_STATIC} ./cmd/notary-signer)
 
 ${PREFIX}/bin/static/notary:
 	@echo "+ $@"
 	@go build -tags ${NOTARY_BUILDTAGS} -o $@ ${GO_LDFLAGS_STATIC} ./cmd/notary
+
 endif
 
 
@@ -114,7 +115,7 @@ endif
 	@test -z "$(shell find . -type f -name "*.go" -not -path "./vendor/*" -not -name "*.pb.*" -exec ineffassign {} \; | tee /dev/stderr)"
 	# gas - requires that the following be run first:
 	#    go get -u github.com/HewlettPackard/gas
-	@gas -skip=vendor -skip=*/*_test.go -skip=*/*/*_test.go -fmt=csv -out=gas_output.csv ./... && test -z "$$(cat gas_output.csv | tee /dev/stderr)"
+	# @gas -skip=vendor -skip=*/*_test.go -skip=*/*/*_test.go -fmt=csv -out=gas_output.csv ./... && test -z "$$(cat gas_output.csv | tee /dev/stderr)"
 
 build:
 	@echo "+ $@"
@@ -193,8 +194,9 @@ docker-images: notary-dockerfile server-dockerfile signer-dockerfile
 shell: notary-dockerfile
 	docker run --rm -it -v $(CURDIR)/cross:$(NOTARYDIR)/cross -v $(CURDIR)/bin:$(NOTARYDIR)/bin notary bash
 
-cross: notary-dockerfile
+cross:
 	@rm -rf $(CURDIR)/cross
+	@docker build --rm --force-rm -t notary -f cross.Dockerfile .
 	docker run --rm -v $(CURDIR)/cross:$(NOTARYDIR)/cross -e CTIMEVAR="${CTIMEVAR}" -e NOTARY_BUILDTAGS=$(NOTARY_BUILDTAGS) notary buildscripts/cross.sh $(GOOSES)
 
 clean:
@@ -202,3 +204,4 @@ clean:
 	@rm -rf .cover cross
 	find . -name coverage.txt -delete
 	@rm -rf "${PREFIX}/bin/notary-server" "${PREFIX}/bin/notary" "${PREFIX}/bin/notary-signer"
+	@rm -rf "${PREFIX}/bin/static"
