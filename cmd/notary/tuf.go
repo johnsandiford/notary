@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/registry/client/auth"
+	"github.com/docker/distribution/registry/client/auth/challenge"
 	"github.com/docker/distribution/registry/client/transport"
 	"github.com/docker/go-connections/tlsconfig"
 	"github.com/docker/notary"
@@ -142,6 +144,7 @@ func (t *tufCommander) AddToCommand(cmd *cobra.Command) {
 	cmd.AddCommand(cmdReset)
 
 	cmd.AddCommand(cmdTUFPublishTemplate.ToCommand(t.tufPublish))
+
 	cmd.AddCommand(cmdTUFLookupTemplate.ToCommand(t.tufLookup))
 
 	cmdTUFList := cmdTUFListTemplate.ToCommand(t.tufList)
@@ -194,8 +197,8 @@ func (t *tufCommander) tufWitness(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gun := args[0]
-	roles := args[1:]
+	gun := data.GUN(args[0])
+	roles := data.NewRoleList(args[1:])
 
 	// no online operations are performed by add so the transport argument
 	// should be nil
@@ -212,7 +215,7 @@ func (t *tufCommander) tufWitness(cmd *cobra.Command, args []string) error {
 
 	cmd.Printf(
 		"The following roles were successfully marked for witnessing on the next publish:\n\t- %s\n",
-		strings.Join(success, "\n\t- "),
+		strings.Join(data.RolesListToStringList(success), "\n\t- "),
 	)
 
 	return maybeAutoPublish(cmd, t.autoPublish, gun, config, t.retriever)
@@ -256,7 +259,7 @@ func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	gun := args[0]
+	gun := data.GUN(args[0])
 	targetName := args[1]
 	targetSize := args[2]
 
@@ -286,10 +289,13 @@ func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 	// Manually construct the target with the given byte size and hashes
 	target := &notaryclient.Target{Name: targetName, Hashes: targetHashes, Length: targetInt64Len}
 
+	roleNames := data.NewRoleList(t.roles)
+
 	// If roles is empty, we default to adding to targets
-	if err = nRepo.AddTarget(target, t.roles...); err != nil {
+	if err = nRepo.AddTarget(target, roleNames...); err != nil {
 		return err
 	}
+
 	// Include the hash algorithms we're using for pretty printing
 	hashesUsed := []string{}
 	for hashName := range targetHashes {
@@ -312,7 +318,7 @@ func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	gun := args[0]
+	gun := data.GUN(args[0])
 	targetName := args[1]
 	targetPath := args[2]
 
@@ -334,7 +340,7 @@ func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// If roles is empty, we default to adding to targets
-	if err = nRepo.AddTarget(target, t.roles...); err != nil {
+	if err = nRepo.AddTarget(target, data.NewRoleList(t.roles)...); err != nil {
 		return err
 	}
 
@@ -353,12 +359,7 @@ func (t *tufCommander) tufDeleteGUN(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	gun := args[0]
-
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
+	gun := data.GUN(args[0])
 
 	// Only initialize a roundtripper if we get the remote flag
 	var rt http.RoundTripper
@@ -371,20 +372,48 @@ func (t *tufCommander) tufDeleteGUN(cmd *cobra.Command, args []string) error {
 		remoteDeleteInfo = " and remote"
 	}
 
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
-
-	if err != nil {
-		return err
-	}
-
 	cmd.Printf("Deleting trust data for repository %s\n", gun)
 
-	if err := nRepo.DeleteTrustData(t.deleteRemote); err != nil {
+	if err := notaryclient.DeleteTrustData(
+		config.GetString("trust_dir"),
+		gun,
+		getRemoteTrustServer(config),
+		rt,
+		t.deleteRemote,
+	); err != nil {
 		return err
 	}
 	cmd.Printf("Successfully deleted local%s trust data for repository %s\n", remoteDeleteInfo, gun)
 	return nil
+}
+
+func importRootKey(cmd *cobra.Command, rootKey string, nRepo *notaryclient.NotaryRepository, retriever notary.PassRetriever) ([]string, error) {
+	var rootKeyList []string
+
+	if rootKey != "" {
+		privKey, err := readKey(data.CanonicalRootRole, rootKey, retriever)
+		if err != nil {
+			return nil, err
+		}
+		err = nRepo.CryptoService.AddKey(data.CanonicalRootRole, "", privKey)
+		if err != nil {
+			return nil, fmt.Errorf("Error importing key: %v", err)
+		}
+		rootKeyList = []string{privKey.ID()}
+	} else {
+		rootKeyList = nRepo.CryptoService.ListKeys(data.CanonicalRootRole)
+	}
+
+	if len(rootKeyList) > 0 {
+		// Chooses the first root key available, which is initialization specific
+		// but should return the HW one first.
+		rootKeyID := rootKeyList[0]
+		cmd.Printf("Root key found, using: %s\n", rootKeyID)
+
+		return []string{rootKeyID}, nil
+	}
+
+	return []string{}, nil
 }
 
 func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
@@ -397,7 +426,7 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gun := args[0]
+	gun := data.GUN(args[0])
 
 	rt, err := getTransport(config, gun, readWrite)
 	if err != nil {
@@ -415,38 +444,12 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var rootKeyList []string
-
-	if t.rootKey != "" {
-		privKey, err := readKey(data.CanonicalRootRole, t.rootKey, t.retriever)
-		if err != nil {
-			return err
-		}
-		err = nRepo.CryptoService.AddKey(data.CanonicalRootRole, "", privKey)
-		if err != nil {
-			return fmt.Errorf("Error importing key: %v", err)
-		}
-		rootKeyList = []string{privKey.ID()}
-	} else {
-		rootKeyList = nRepo.CryptoService.ListKeys(data.CanonicalRootRole)
+	rootKeyIDs, err := importRootKey(cmd, t.rootKey, nRepo, t.retriever)
+	if err != nil {
+		return err
 	}
 
-	var rootKeyID string
-	if len(rootKeyList) < 1 {
-		cmd.Println("No root keys found. Generating a new root key...")
-		rootPublicKey, err := nRepo.CryptoService.Create(data.CanonicalRootRole, "", data.ECDSAKey)
-		if err != nil {
-			return err
-		}
-		rootKeyID = rootPublicKey.ID()
-	} else {
-		// Chooses the first root key available, which is initialization specific
-		// but should return the HW one first.
-		rootKeyID = rootKeyList[0]
-		cmd.Printf("Root key found, using: %s\n", rootKeyID)
-	}
-
-	if err = nRepo.Initialize([]string{rootKeyID}); err != nil {
+	if err = nRepo.Initialize(rootKeyIDs); err != nil {
 		return err
 	}
 
@@ -455,7 +458,7 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 
 // Attempt to read a role key from a file, and return it as a data.PrivateKey
 // If key is for the Root role, it must be encrypted
-func readKey(role, keyFilename string, retriever notary.PassRetriever) (data.PrivateKey, error) {
+func readKey(role data.RoleName, keyFilename string, retriever notary.PassRetriever) (data.PrivateKey, error) {
 	keyFile, err := os.Open(keyFilename)
 	if err != nil {
 		return nil, fmt.Errorf("Opening file to import as a root key: %v", err)
@@ -475,7 +478,7 @@ func readKey(role, keyFilename string, retriever notary.PassRetriever) (data.Pri
 	}
 	var privKey data.PrivateKey
 	if isEncrypted {
-		privKey, _, err = trustmanager.GetPasswdDecryptBytes(retriever, pemBytes, "", data.CanonicalRootRole)
+		privKey, _, err = trustmanager.GetPasswdDecryptBytes(retriever, pemBytes, "", data.CanonicalRootRole.String())
 	} else {
 		privKey, err = tufutils.ParsePEMPrivateKey(pemBytes, "")
 	}
@@ -495,7 +498,7 @@ func (t *tufCommander) tufList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gun := args[0]
+	gun := data.GUN(args[0])
 
 	rt, err := getTransport(config, gun, readOnly)
 	if err != nil {
@@ -514,8 +517,7 @@ func (t *tufCommander) tufList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Retrieve the remote list of signed targets, prioritizing the passed-in list over targets
-	roles := append(t.roles, data.CanonicalTargetsRole)
-	targetList, err := nRepo.ListTargets(roles...)
+	targetList, err := nRepo.ListTargets(data.NewRoleList(t.roles)...)
 	if err != nil {
 		return err
 	}
@@ -534,7 +536,7 @@ func (t *tufCommander) tufLookup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	gun := args[0]
+	gun := data.GUN(args[0])
 	targetName := args[1]
 
 	rt, err := getTransport(config, gun, readOnly)
@@ -572,7 +574,7 @@ func (t *tufCommander) tufStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gun := args[0]
+	gun := data.GUN(args[0])
 
 	trustPin, err := getTrustPinning(config)
 	if err != nil {
@@ -629,7 +631,7 @@ func (t *tufCommander) tufReset(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gun := args[0]
+	gun := data.GUN(args[0])
 
 	trustPin, err := getTrustPinning(config)
 	if err != nil {
@@ -669,7 +671,7 @@ func (t *tufCommander) tufPublish(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gun := args[0]
+	gun := data.GUN(args[0])
 
 	cmd.Println("Pushing changes to", gun)
 
@@ -689,7 +691,7 @@ func (t *tufCommander) tufPublish(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return publishAndPrintToCLI(cmd, nRepo, gun)
+	return publishAndPrintToCLI(cmd, nRepo)
 }
 
 func (t *tufCommander) tufRemove(cmd *cobra.Command, args []string) error {
@@ -701,7 +703,7 @@ func (t *tufCommander) tufRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	gun := args[0]
+	gun := data.GUN(args[0])
 	targetName := args[1]
 
 	trustPin, err := getTrustPinning(config)
@@ -716,8 +718,9 @@ func (t *tufCommander) tufRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	// If roles is empty, we default to removing from targets
-	if err = repo.RemoveTarget(targetName, t.roles...); err != nil {
+	if err = repo.RemoveTarget(targetName, data.NewRoleList(t.roles)...); err != nil {
 		return err
 	}
 
@@ -742,7 +745,7 @@ func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	gun := args[0]
+	gun := data.GUN(args[0])
 	targetName := args[1]
 
 	rt, err := getTransport(config, gun, readOnly)
@@ -829,7 +832,7 @@ const (
 // The readOnly flag indicates if the operation should be performed as an
 // anonymous read only operation. If the command entered requires write
 // permissions on the server, readOnly must be false
-func getTransport(config *viper.Viper, gun string, permission httpAccess) (http.RoundTripper, error) {
+func getTransport(config *viper.Viper, gun data.GUN, permission httpAccess) (http.RoundTripper, error) {
 	// Attempt to get a root CA from the config file. Nil is the host defaults.
 	rootCAFile := utils.GetPathRelativeToConfig(config, "remote_server.root_ca")
 	clientCert := utils.GetPathRelativeToConfig(config, "remote_server.tls_client_cert")
@@ -869,7 +872,7 @@ func getTransport(config *viper.Viper, gun string, permission httpAccess) (http.
 	return tokenAuth(trustServerURL, base, gun, permission)
 }
 
-func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
+func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun data.GUN,
 	permission httpAccess) (http.RoundTripper, error) {
 
 	// TODO(dmcgowan): add notary specific headers
@@ -885,7 +888,7 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
 	if endpoint.Scheme == "" {
 		return nil, fmt.Errorf("Trust server url has to be in the form of http(s)://URL:PORT. Got: %s", trustServerURL)
 	}
-	subPath, err := url.Parse("v2/")
+	subPath, err := url.Parse(path.Join(endpoint.Path, "/v2") + "/")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse v2 subpath. This error should not have been reached. Please report it as an issue at https://github.com/docker/notary/issues: %s", err.Error())
 	}
@@ -912,7 +915,7 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
 		return nil, nil
 	}
 
-	challengeManager := auth.NewSimpleChallengeManager()
+	challengeManager := challenge.NewSimpleManager()
 	if err := challengeManager.AddResponse(resp); err != nil {
 		return nil, err
 	}
@@ -931,7 +934,7 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
 		return nil, fmt.Errorf("Invalid permission requested for token authentication of gun %s", gun)
 	}
 
-	tokenHandler := auth.NewTokenHandler(authTransport, ps, gun, actions...)
+	tokenHandler := auth.NewTokenHandler(authTransport, ps, gun.String(), actions...)
 	basicHandler := auth.NewBasicHandler(ps)
 
 	modifier := auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler)
@@ -942,7 +945,7 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun string,
 
 	// Try to authenticate read only repositories using basic username/password authentication
 	return newAuthRoundTripper(transport.NewTransport(baseTransport, modifier),
-		transport.NewTransport(baseTransport, auth.NewAuthorizer(challengeManager, auth.NewTokenHandler(authTransport, passwordStore{anonymous: false}, gun, actions...)))), nil
+		transport.NewTransport(baseTransport, auth.NewAuthorizer(challengeManager, auth.NewTokenHandler(authTransport, passwordStore{anonymous: false}, gun.String(), actions...)))), nil
 }
 
 func getRemoteTrustServer(config *viper.Viper) string {
@@ -1010,7 +1013,7 @@ func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun string, config *viper.Viper, passRetriever notary.PassRetriever) error {
+func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun data.GUN, config *viper.Viper, passRetriever notary.PassRetriever) error {
 
 	if !doPublish {
 		return nil
@@ -1033,14 +1036,14 @@ func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun string, config *vi
 		return err
 	}
 
-	cmd.Println("Auto-publishing changes to", gun)
-	return publishAndPrintToCLI(cmd, nRepo, gun)
+	cmd.Println("Auto-publishing changes to", nRepo.GetGUN())
+	return publishAndPrintToCLI(cmd, nRepo)
 }
 
-func publishAndPrintToCLI(cmd *cobra.Command, nRepo *notaryclient.NotaryRepository, gun string) error {
+func publishAndPrintToCLI(cmd *cobra.Command, nRepo *notaryclient.NotaryRepository) error {
 	if err := nRepo.Publish(); err != nil {
 		return err
 	}
-	cmd.Printf("Successfully published changes for repository %s\n", gun)
+	cmd.Printf("Successfully published changes for repository %s\n", nRepo.GetGUN())
 	return nil
 }
