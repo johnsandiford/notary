@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Sirupsen/logrus"
 	ctxu "github.com/docker/distribution/context"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
@@ -333,17 +333,17 @@ func setUpRepo(t *testing.T, tempBaseDir string, gun data.GUN, ret notary.PassRe
 	cryptoService := cryptoservice.NewCryptoService(trustmanager.NewKeyMemoryStore(ret))
 	ts := httptest.NewServer(server.RootHandler(ctx, nil, cryptoService, nil, nil, nil))
 
-	repo, err := client.NewFileCachedNotaryRepository(
+	repo, err := client.NewFileCachedRepository(
 		tempBaseDir, gun, ts.URL, http.DefaultTransport, ret, trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
-	rootPubKey, err := repo.CryptoService.Create(data.CanonicalRootRole, "", data.ECDSAKey)
+	rootPubKey, err := repo.GetCryptoService().Create(data.CanonicalRootRole, "", data.ECDSAKey)
 	require.NoError(t, err, "error generating root key: %s", err)
 
 	err = repo.Initialize([]string{rootPubKey.ID()})
 	require.NoError(t, err)
 
-	return ts, repo.CryptoService.ListAllKeys()
+	return ts, repo.GetCryptoService().ListAllKeys()
 }
 
 // The command line uses NotaryRepository's RotateKey - this is just testing
@@ -376,14 +376,14 @@ func TestRotateKeyRemoteServerManagesKey(t *testing.T) {
 		}
 		require.NoError(t, k.keysRotate(&cobra.Command{}, []string{gun.String(), role, "-r"}))
 
-		repo, err := client.NewFileCachedNotaryRepository(tempBaseDir, data.GUN(gun), ts.URL, http.DefaultTransport, ret, trustpinning.TrustPinConfig{})
+		repo, err := client.NewFileCachedRepository(tempBaseDir, data.GUN(gun), ts.URL, http.DefaultTransport, ret, trustpinning.TrustPinConfig{})
 		require.NoError(t, err, "error creating repo: %s", err)
 
 		cl, err := repo.GetChangelist()
 		require.NoError(t, err, "unable to get changelist: %v", err)
 		require.Len(t, cl.List(), 0, "expected the changes to have been published")
 
-		finalKeys := repo.CryptoService.ListAllKeys()
+		finalKeys := repo.GetCryptoService().ListAllKeys()
 		// no keys have been created, since a remote key was specified
 		if role == data.CanonicalSnapshotRole.String() {
 			require.Len(t, finalKeys, 2)
@@ -430,7 +430,7 @@ func TestRotateKeyBothKeys(t *testing.T) {
 	require.NoError(t, k.keysRotate(&cobra.Command{}, []string{gun.String(), data.CanonicalTargetsRole.String()}))
 	require.NoError(t, k.keysRotate(&cobra.Command{}, []string{gun.String(), data.CanonicalSnapshotRole.String()}))
 
-	repo, err := client.NewFileCachedNotaryRepository(tempBaseDir, data.GUN(gun), ts.URL, nil, ret, trustpinning.TrustPinConfig{})
+	repo, err := client.NewFileCachedRepository(tempBaseDir, data.GUN(gun), ts.URL, nil, ret, trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
 	cl, err := repo.GetChangelist()
@@ -438,7 +438,7 @@ func TestRotateKeyBothKeys(t *testing.T) {
 	require.Len(t, cl.List(), 0)
 
 	// two new keys have been created, and the old keys should still be gone
-	newKeys := repo.CryptoService.ListAllKeys()
+	newKeys := repo.GetCryptoService().ListAllKeys()
 	// there should be 3 keys - snapshot, targets, and root
 	require.Len(t, newKeys, 3)
 
@@ -495,11 +495,11 @@ func TestRotateKeyRootIsInteractive(t *testing.T) {
 
 	require.Contains(t, out.String(), "Aborting action")
 
-	repo, err := client.NewFileCachedNotaryRepository(tempBaseDir, gun, ts.URL, nil, ret, trustpinning.TrustPinConfig{})
+	repo, err := client.NewFileCachedRepository(tempBaseDir, gun, ts.URL, nil, ret, trustpinning.TrustPinConfig{})
 	require.NoError(t, err, "error creating repo: %s", err)
 
 	// There should still just be one root key (and one targets and one snapshot)
-	allKeys := repo.CryptoService.ListAllKeys()
+	allKeys := repo.GetCryptoService().ListAllKeys()
 	require.Len(t, allKeys, 3)
 }
 

@@ -14,12 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/go/canonical/json"
 	"github.com/docker/notary"
+	"github.com/sirupsen/logrus"
 )
 
-// GUN type for specifying gun
+// GUN is a Globally Unique Name. It is used to identify trust collections.
+// An example usage of this is for container image repositories.
+// For example: myregistry.io/myuser/myimage
 type GUN string
 
 func (g GUN) String() string {

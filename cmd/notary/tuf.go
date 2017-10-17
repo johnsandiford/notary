@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/distribution/registry/client/auth/challenge"
 	"github.com/docker/distribution/registry/client/transport"
@@ -31,6 +30,7 @@ import (
 	"github.com/docker/notary/tuf/data"
 	tufutils "github.com/docker/notary/tuf/utils"
 	"github.com/docker/notary/utils"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -200,17 +200,12 @@ func (t *tufCommander) tufWitness(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
+
 	gun := data.GUN(args[0])
 	roles := data.NewRoleList(args[1:])
 
-	// no online operations are performed by add so the transport argument
-	// should be nil
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, false)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -296,15 +291,10 @@ func (t *tufCommander) tufAddByHash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
 	// no online operations are performed by add so the transport argument
 	// should be nil
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, false)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -357,15 +347,10 @@ func (t *tufCommander) tufAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
 	// no online operations are performed by add so the transport argument
 	// should be nil
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, false)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -424,7 +409,7 @@ func (t *tufCommander) tufDeleteGUN(cmd *cobra.Command, args []string) error {
 
 // importRootKey imports the root key from path then adds the key to repo
 // returns key ids
-func importRootKey(cmd *cobra.Command, rootKey string, nRepo *notaryclient.NotaryRepository, retriever notary.PassRetriever) ([]string, error) {
+func importRootKey(cmd *cobra.Command, rootKey string, nRepo notaryclient.Repository, retriever notary.PassRetriever) ([]string, error) {
 	var rootKeyList []string
 
 	if rootKey != "" {
@@ -433,13 +418,13 @@ func importRootKey(cmd *cobra.Command, rootKey string, nRepo *notaryclient.Notar
 			return nil, err
 		}
 		// add root key to repo
-		err = nRepo.CryptoService.AddKey(data.CanonicalRootRole, "", privKey)
+		err = nRepo.GetCryptoService().AddKey(data.CanonicalRootRole, "", privKey)
 		if err != nil {
 			return nil, fmt.Errorf("Error importing key: %v", err)
 		}
 		rootKeyList = []string{privKey.ID()}
 	} else {
-		rootKeyList = nRepo.CryptoService.ListKeys(data.CanonicalRootRole)
+		rootKeyList = nRepo.GetCryptoService().ListKeys(data.CanonicalRootRole)
 	}
 
 	if len(rootKeyList) > 0 {
@@ -495,18 +480,8 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 	}
 	gun := data.GUN(args[0])
 
-	rt, err := getTransport(config, gun, readWrite)
-	if err != nil {
-		return err
-	}
-
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, true)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -526,7 +501,7 @@ func (t *tufCommander) tufInit(cmd *cobra.Command, args []string) error {
 		rootKeyIDs = []string{}
 	}
 
-	if err = nRepo.InitializeWithCertificate(rootKeyIDs, rootCerts, nRepo); err != nil {
+	if err = nRepo.InitializeWithCertificate(rootKeyIDs, rootCerts); err != nil {
 		return err
 	}
 
@@ -571,18 +546,8 @@ func (t *tufCommander) tufList(cmd *cobra.Command, args []string) error {
 	}
 	gun := data.GUN(args[0])
 
-	rt, err := getTransport(config, gun, readOnly)
-	if err != nil {
-		return err
-	}
-
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, true)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -610,18 +575,8 @@ func (t *tufCommander) tufLookup(cmd *cobra.Command, args []string) error {
 	gun := data.GUN(args[0])
 	targetName := args[1]
 
-	rt, err := getTransport(config, gun, readOnly)
-	if err != nil {
-		return err
-	}
-
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, true)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -647,13 +602,8 @@ func (t *tufCommander) tufStatus(cmd *cobra.Command, args []string) error {
 	}
 	gun := data.GUN(args[0])
 
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, false)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -704,13 +654,8 @@ func (t *tufCommander) tufReset(cmd *cobra.Command, args []string) error {
 	}
 	gun := data.GUN(args[0])
 
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, false)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -746,18 +691,8 @@ func (t *tufCommander) tufPublish(cmd *cobra.Command, args []string) error {
 
 	cmd.Println("Pushing changes to", gun)
 
-	rt, err := getTransport(config, gun, readWrite)
-	if err != nil {
-		return err
-	}
-
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, true)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -777,21 +712,14 @@ func (t *tufCommander) tufRemove(cmd *cobra.Command, args []string) error {
 	gun := data.GUN(args[0])
 	targetName := args[1]
 
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	// no online operation are performed by remove so the transport argument
-	// should be nil.
-	repo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), nil, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, false)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
 
 	// If roles is empty, we default to removing from targets
-	if err = repo.RemoveTarget(targetName, data.NewRoleList(t.roles)...); err != nil {
+	if err = nRepo.RemoveTarget(targetName, data.NewRoleList(t.roles)...); err != nil {
 		return err
 	}
 
@@ -819,18 +747,8 @@ func (t *tufCommander) tufVerify(cmd *cobra.Command, args []string) error {
 	gun := data.GUN(args[0])
 	targetName := args[1]
 
-	rt, err := getTransport(config, gun, readOnly)
-	if err != nil {
-		return err
-	}
-
-	trustPin, err := getTrustPinning(config)
-	if err != nil {
-		return err
-	}
-
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
-		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, t.retriever, trustPin)
+	fact := ConfigureRepo(config, t.retriever, true)
+	nRepo, err := fact(gun)
 	if err != nil {
 		return err
 	}
@@ -851,6 +769,16 @@ type passwordStore struct {
 	anonymous bool
 }
 
+func getUsername(input chan string) {
+	in := bufio.NewReader(os.Stdin)
+	result, err := in.ReadString('\n')
+	if err != nil {
+		logrus.Errorf("error processing username input: %s", err)
+		input <- ""
+	}
+	input <- result
+}
+
 func (ps passwordStore) Basic(u *url.URL) (string, string) {
 	// if it's not a terminal, don't wait on input
 	if ps.anonymous {
@@ -858,15 +786,20 @@ func (ps passwordStore) Basic(u *url.URL) (string, string) {
 	}
 
 	stdin := bufio.NewReader(os.Stdin)
+	input := make(chan string, 1)
 	fmt.Fprintf(os.Stdout, "Enter username: ")
-
-	userIn, err := stdin.ReadBytes('\n')
-	if err != nil {
-		logrus.Errorf("error processing username input: %s", err)
+	go getUsername(input)
+	var username string
+	select {
+	case i := <-input:
+		username = strings.TrimSpace(i)
+		if username == "" {
+			return "", ""
+		}
+	case <-time.After(30 * time.Second):
+		logrus.Error("timeout when retrieving username input")
 		return "", ""
 	}
-
-	username := strings.TrimSpace(string(userIn))
 
 	fmt.Fprintf(os.Stdout, "Enter password: ")
 	passphrase, err := passphrase.GetPassphrase(stdin)
@@ -923,6 +856,7 @@ func getTransport(config *viper.Viper, gun data.GUN, permission httpAccess) (htt
 		InsecureSkipVerify: insecureSkipVerify,
 		CertFile:           clientCert,
 		KeyFile:            clientKey,
+		ExclusiveRootPools: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to configure TLS: %s", err.Error())
@@ -1101,7 +1035,7 @@ func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun data.GUN, config *
 		return err
 	}
 
-	nRepo, err := notaryclient.NewFileCachedNotaryRepository(
+	nRepo, err := notaryclient.NewFileCachedRepository(
 		config.GetString("trust_dir"), gun, getRemoteTrustServer(config), rt, passRetriever, trustPin)
 	if err != nil {
 		return err
@@ -1111,7 +1045,7 @@ func maybeAutoPublish(cmd *cobra.Command, doPublish bool, gun data.GUN, config *
 	return publishAndPrintToCLI(cmd, nRepo)
 }
 
-func publishAndPrintToCLI(cmd *cobra.Command, nRepo *notaryclient.NotaryRepository) error {
+func publishAndPrintToCLI(cmd *cobra.Command, nRepo notaryclient.Repository) error {
 	if err := nRepo.Publish(); err != nil {
 		return err
 	}
