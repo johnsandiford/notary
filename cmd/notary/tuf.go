@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -21,18 +22,18 @@ import (
 	"github.com/docker/distribution/registry/client/transport"
 	"github.com/docker/go-connections/tlsconfig"
 	canonicaljson "github.com/docker/go/canonical/json"
-	"github.com/docker/notary"
-	notaryclient "github.com/docker/notary/client"
-	"github.com/docker/notary/cryptoservice"
-	"github.com/docker/notary/passphrase"
-	"github.com/docker/notary/trustmanager"
-	"github.com/docker/notary/trustpinning"
-	"github.com/docker/notary/tuf/data"
-	tufutils "github.com/docker/notary/tuf/utils"
-	"github.com/docker/notary/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/theupdateframework/notary"
+	notaryclient "github.com/theupdateframework/notary/client"
+	"github.com/theupdateframework/notary/cryptoservice"
+	"github.com/theupdateframework/notary/passphrase"
+	"github.com/theupdateframework/notary/trustmanager"
+	"github.com/theupdateframework/notary/trustpinning"
+	"github.com/theupdateframework/notary/tuf/data"
+	tufutils "github.com/theupdateframework/notary/tuf/utils"
+	"github.com/theupdateframework/notary/utils"
 )
 
 var cmdTUFListTemplate = usageTemplate{
@@ -785,6 +786,30 @@ func (ps passwordStore) Basic(u *url.URL) (string, string) {
 		return "", ""
 	}
 
+	auth := os.Getenv("NOTARY_AUTH")
+	if auth != "" {
+		dec, err := base64.StdEncoding.DecodeString(auth)
+		if err != nil {
+			logrus.Error("Could not base64-decode authentication string")
+			return "", ""
+		}
+		plain := string(dec)
+
+		i := strings.Index(plain, ":")
+		if i == 0 {
+			logrus.Error("Authentication string with zero-legnth username")
+			return "", ""
+		} else if i > -1 {
+			username := plain[:i]
+			password := plain[i+1:]
+			password = strings.TrimSpace(password)
+			return username, password
+		}
+
+		logrus.Error("Malformatted authentication string; format must be <username>:<password>")
+		return "", ""
+	}
+
 	stdin := bufio.NewReader(os.Stdin)
 	input := make(chan string, 1)
 	fmt.Fprintf(os.Stdout, "Enter username: ")
@@ -895,7 +920,7 @@ func tokenAuth(trustServerURL string, baseTransport *http.Transport, gun data.GU
 	}
 	subPath, err := url.Parse(path.Join(endpoint.Path, "/v2") + "/")
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse v2 subpath. This error should not have been reached. Please report it as an issue at https://github.com/docker/notary/issues: %s", err.Error())
+		return nil, fmt.Errorf("Failed to parse v2 subpath. This error should not have been reached. Please report it as an issue at https://github.com/theupdateframework/notary/issues: %s", err.Error())
 	}
 	endpoint = endpoint.ResolveReference(subPath)
 	req, err := http.NewRequest("GET", endpoint.String(), nil)

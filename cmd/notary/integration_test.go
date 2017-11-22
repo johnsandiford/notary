@@ -27,20 +27,20 @@ import (
 
 	ctxu "github.com/docker/distribution/context"
 	canonicaljson "github.com/docker/go/canonical/json"
-	"github.com/docker/notary"
-	"github.com/docker/notary/client"
-	"github.com/docker/notary/cryptoservice"
-	"github.com/docker/notary/passphrase"
-	"github.com/docker/notary/server"
-	"github.com/docker/notary/server/storage"
-	nstorage "github.com/docker/notary/storage"
-	"github.com/docker/notary/trustmanager"
-	"github.com/docker/notary/tuf/data"
-	testutils "github.com/docker/notary/tuf/testutils/keys"
-	"github.com/docker/notary/tuf/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+	"github.com/theupdateframework/notary"
+	"github.com/theupdateframework/notary/client"
+	"github.com/theupdateframework/notary/cryptoservice"
+	"github.com/theupdateframework/notary/passphrase"
+	"github.com/theupdateframework/notary/server"
+	"github.com/theupdateframework/notary/server/storage"
+	nstorage "github.com/theupdateframework/notary/storage"
+	"github.com/theupdateframework/notary/trustmanager"
+	"github.com/theupdateframework/notary/tuf/data"
+	testutils "github.com/theupdateframework/notary/tuf/testutils/keys"
+	"github.com/theupdateframework/notary/tuf/utils"
 	"golang.org/x/net/context"
 )
 
@@ -2663,7 +2663,7 @@ func TestClientKeyImport(t *testing.T) {
 
 	// import the key
 	_, err = runCommand(t, tempDir, "key", "import", tempFile6.Name())
-	require.NoError(t, err)
+	require.EqualError(t, err, "failed to import all keys: invalid key pem block")
 
 	// if there is hardware available, root will only be on hardware, and not
 	// on disk
@@ -2720,7 +2720,7 @@ func TestClientKeyImport(t *testing.T) {
 
 	// import the key
 	_, err = runCommand(t, tempDir, "key", "import", tempFile8.Name())
-	require.NoError(t, err)
+	require.EqualError(t, err, "failed to import all keys: invalid key pem block")
 
 	// if there is hardware available, root will only be on hardware, and not
 	// on disk
