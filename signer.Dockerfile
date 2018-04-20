@@ -1,7 +1,6 @@
-FROM golang:1.8.4-alpine
-MAINTAINER David Lawrence "david.lawrence@docker.com"
+FROM golang:1.10.1-alpine
 
-RUN apk add --update git gcc libc-dev && rm -rf /var/cache/apk/*
+RUN apk add --update git gcc libc-dev
 
 # Pin to the specific v3.0.0 version
 RUN go get -tags 'mysql postgres file' github.com/mattes/migrate/cli && mv /go/bin/cli /go/bin/migrate
@@ -23,7 +22,7 @@ ENV NOTARY_SIGNER_TIMESTAMP_1="testpassword"
 RUN go install \
     -tags pkcs11 \
     -ldflags "-w -X ${NOTARYPKG}/version.GitCommit=`git rev-parse --short HEAD` -X ${NOTARYPKG}/version.NotaryVersion=`cat NOTARY_VERSION`" \
-    ${NOTARYPKG}/cmd/notary-signer && apk del git gcc libc-dev
+    ${NOTARYPKG}/cmd/notary-signer && apk del git gcc libc-dev && rm -rf /var/cache/apk/*
 
 ENTRYPOINT [ "notary-signer" ]
 CMD [ "-config=fixtures/signer-config-local.json" ]

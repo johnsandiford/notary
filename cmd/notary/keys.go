@@ -177,7 +177,7 @@ func (k *keyCommander) keysList(cmd *cobra.Command, args []string) error {
 	}
 
 	cmd.Println("")
-	prettyPrintKeys(ks, cmd.Out())
+	prettyPrintKeys(ks, cmd.OutOrStdout())
 	cmd.Println("")
 	return nil
 }
@@ -336,7 +336,7 @@ func (k *keyCommander) keysRotate(cmd *cobra.Command, args []string) error {
 			"Are you sure you want to proceed?  (yes/no)  ")
 
 		if !askConfirm(k.input) {
-			fmt.Fprintln(cmd.Out(), "\nAborting action.")
+			fmt.Fprintln(cmd.OutOrStdout(), "\nAborting action.")
 			return nil
 		}
 	}
@@ -433,7 +433,7 @@ func (k *keyCommander) keyRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid key ID provided: %s", keyID)
 	}
 	cmd.Println("")
-	err = removeKeyInteractively(ks, keyID, k.input, cmd.Out())
+	err = removeKeyInteractively(ks, keyID, k.input, cmd.OutOrStdout())
 	cmd.Println("")
 	return err
 }
@@ -518,7 +518,7 @@ func (k *keyCommander) importKeys(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	for _, file := range args {
-		from, err := os.OpenFile(file, os.O_RDONLY, notary.PrivExecPerms)
+		from, err := os.Open(file)
 		if err != nil {
 			return err
 		}
@@ -545,9 +545,9 @@ func (k *keyCommander) exportKeys(cmd *cobra.Command, args []string) error {
 	}
 
 	if k.outFile == "" {
-		out = cmd.Out()
+		out = cmd.OutOrStdout()
 	} else {
-		f, err := os.OpenFile(k.outFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, notary.PrivExecPerms)
+		f, err := os.OpenFile(k.outFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, notary.PrivNoExecPerms)
 		if err != nil {
 			return err
 		}

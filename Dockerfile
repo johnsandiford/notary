@@ -1,4 +1,4 @@
-FROM golang:1.8.4
+FROM golang:1.10.1
 
 RUN apt-get update && apt-get install -y \
 	curl \
@@ -10,12 +10,13 @@ RUN apt-get update && apt-get install -y \
 	xz-utils \
 	python \
 	python-pip \
+	python-setuptools \
 	--no-install-recommends \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN useradd -ms /bin/bash notary \
 	&& pip install codecov \
-	&& go get github.com/golang/lint/golint github.com/fzipp/gocyclo github.com/client9/misspell/cmd/misspell github.com/gordonklaus/ineffassign github.com/HewlettPackard/gas
+	&& go get github.com/golang/lint/golint github.com/fzipp/gocyclo github.com/client9/misspell/cmd/misspell github.com/gordonklaus/ineffassign github.com/GoASTScanner/gas/cmd/gas/...
 
 ENV NOTARYDIR /go/src/github.com/theupdateframework/notary
 

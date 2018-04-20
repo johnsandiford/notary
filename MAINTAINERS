@@ -1,6 +1,6 @@
 # Notary maintainers file
 #
-# This file describes who runs the docker/notary project and how.
+# This file describes who runs the theupdateframework/notary project and how.
 # This is a living document - if you see something out of date or missing, speak up!
 #
 # It is structured to be consumable by both humans and programs.
@@ -60,5 +60,5 @@
 
 	[people.riyazdf]
 	Name = "Riyaz Faizullabhoy"
-	Email = "riyaz@docker.com"
+	Email = "riyazdf@berkeley.edu"
 	GitHub = "riyazdf"

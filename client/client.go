@@ -1,88 +1,4 @@
-/*
-Package client implements everything required for interacting with a Notary repository.
-
-Usage
-
-Use this package by creating a new repository object and calling methods on it.
-
-	package main
-
-	import (
-		"encoding/hex"
-		"fmt"
-		"net/http"
-		"os"
-		"time"
-
-		"github.com/docker/distribution/registry/client/auth"
-		"github.com/docker/distribution/registry/client/auth/challenge"
-		"github.com/docker/distribution/registry/client/transport"
-		notary "github.com/theupdateframework/notary/client"
-		"github.com/theupdateframework/notary/trustpinning"
-		"github.com/theupdateframework/notary/tuf/data"
-	)
-
-	func main() {
-		rootDir := ".trust"
-		if err := os.MkdirAll(rootDir, 0700); err != nil {
-			panic(err)
-		}
-
-		server := "https://notary.docker.io"
-		image := "docker.io/library/alpine"
-		repo, err := notary.NewFileCachedNotaryRepository(
-			rootDir,
-			data.GUN(image),
-			server,
-			makeHubTransport(server, image),
-			nil,
-			trustpinning.TrustPinConfig{},
-		)
-
-		targets, err := repo.ListTargets()
-		if err != nil {
-			panic(err)
-		}
-
-		for _, tgt := range targets {
-			fmt.Printf("%s\t%s\n", tgt.Name, hex.EncodeToString(tgt.Hashes["sha256"]))
-		}
-	}
-
-	func makeHubTransport(server, image string) http.RoundTripper {
-		base := http.DefaultTransport
-		modifiers := []transport.RequestModifier{
-			transport.NewHeaderRequestModifier(http.Header{
-				"User-Agent": []string{"my-client"},
-			}),
-		}
-
-		authTransport := transport.NewTransport(base, modifiers...)
-		pingClient := &http.Client{
-			Transport: authTransport,
-			Timeout:   5 * time.Second,
-		}
-		req, err := http.NewRequest("GET", server+"/v2/", nil)
-		if err != nil {
-			panic(err)
-		}
-
-		challengeManager := challenge.NewSimpleManager()
-		resp, err := pingClient.Do(req)
-		if err != nil {
-			panic(err)
-		}
-		defer resp.Body.Close()
-		if err := challengeManager.AddResponse(resp); err != nil {
-			panic(err)
-		}
-		tokenHandler := auth.NewTokenHandler(base, nil, image, "pull")
-		modifiers = append(modifiers, auth.NewAuthorizer(challengeManager, tokenHandler, auth.NewBasicHandler(nil)))
-
-		return transport.NewTransport(base, modifiers...)
-	}
-
-*/
+//Package client implements everything required for interacting with a Notary repository.
 package client
 
 import (
@@ -123,7 +39,6 @@ func init() {
 
 // repository stores all the information needed to operate on a notary repository.
 type repository struct {
-	baseDir        string
 	gun            data.GUN
 	baseURL        string
 	changelist     changelist.Changelist
@@ -140,7 +55,8 @@ type repository struct {
 // NewFileCachedRepository is a wrapper for NewRepository that initializes
 // a file cache from the provided repository, local config information and a crypto service.
 // It also retrieves the remote store associated to the base directory under where all the
-// trust files will be stored and the specified GUN.
+// trust files will be stored (This is normally defaults to "~/.notary" or "~/.docker/trust"
+// when enabling Docker content trust) and the specified GUN.
 //
 // In case of a nil RoundTripper, a default offline store is used instead.
 func NewFileCachedRepository(baseDir string, gun data.GUN, baseURL string, rt http.RoundTripper,
@@ -174,16 +90,13 @@ func NewFileCachedRepository(baseDir string, gun data.GUN, baseURL string, rt ht
 		return nil, err
 	}
 
-	return NewRepository(baseDir, gun, baseURL, remoteStore, cache, trustPinning, cryptoService, cl)
+	return NewRepository(gun, baseURL, remoteStore, cache, trustPinning, cryptoService, cl)
 }
 
 // NewRepository is the base method that returns a new notary repository.
-// It takes the base directory under where all the trust files will be stored
-// (This is normally defaults to "~/.notary" or "~/.docker/trust" when enabling
-// docker content trust).
 // It expects an initialized cache. In case of a nil remote store, a default
 // offline store is used.
-func NewRepository(baseDir string, gun data.GUN, baseURL string, remoteStore store.RemoteStore, cache store.MetadataStore,
+func NewRepository(gun data.GUN, baseURL string, remoteStore store.RemoteStore, cache store.MetadataStore,
 	trustPinning trustpinning.TrustPinConfig, cryptoService signed.CryptoService, cl changelist.Changelist) (Repository, error) {
 
 	// Repo's remote store is either a valid remote store or an OfflineStore
@@ -198,7 +111,6 @@ func NewRepository(baseDir string, gun data.GUN, baseURL string, remoteStore sto
 	nRepo := &repository{
 		gun:            gun,
 		baseURL:        baseURL,
-		baseDir:        baseDir,
 		changelist:     cl,
 		cache:          cache,
 		remoteStore:    remoteStore,
